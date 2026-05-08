@@ -7,8 +7,8 @@ A unified, keyboard-centric terminal user interface for managing your Audible li
 - **Unified Workflow:** One interface to browse, download, and process your library.
 - **Dynamic Action Key:** Press `Enter` to perform the next logical step (Download -> Process).
 - **Full Vim-style Navigation:** Navigate your library using `h`, `j`, `k`, `l`, `u`, `d`, `g`, and `G`.
-- **Real-time Filtering:** Fast, `fzf`-like search across ASIN, Author, and Title.
-- **Visual Status Indicators:** Instant feedback on what's downloaded (⬇ ) and what's ready (✔).
+- **Real-time Search Filtering:** Fast, `fzf`-like search across ASIN, Author, and Title.
+- **Visual Status Indicators:** Instant feedback on what's downloaded ( ⬇ ) and what's ready (✔).
 - **Persistent Preferences:** Remembers your chosen theme and log visibility across sessions.
 - **Detailed Terminal Output:** A pop-up modal shows real-time progress from underlying tools.
 
@@ -27,7 +27,7 @@ Used for converting files and embedding chapters/cover art.
 
 The manager uses the `audible` command-line tool to interact with your library.
 
-- **Installation:** `pip install audible-cli`
+- **Installation:** `pip install audible-cli` or `uv tool install audible-cli`
 - **Setup:** You must be logged in for the manager to fetch your library. Run `audible login` to authenticate.
 
 ### 3. uv (Recommended)
@@ -52,11 +52,11 @@ uv run audiobook_manager.py
 | :-------- | :---------------- | :------------------------------------------------- |
 | `Tab`     | **Tab**           | Cycle focus (Search -> Library -> Log)             |
 | `Enter`   | **Action**        | Download (if missing) or Process (if AAX present)  |
-| `j` / `k` | **Down / Up**     | Move selection one row                             |
-| `d` / `u` | **PgDown / PgUp** | Jump a page down or up                             |
-| `h` / `l` | **Left / Right**  | Scroll table horizontally                          |
+| `j` / `k` | **Down / Up**     | Move selection one row down or up                  |
+| `d` / `u` | **PgDown / PgUp** | Jump down or up a page                             |
+| `h` / `l` | **Left / Right**  | Scroll library view horizontally                   |
 | `g` / `G` | **Top / Bottom**  | Jump to the start or end of the list               |
-| `/`       | **Search**        | Focus the filter input                             |
+| `/`       | **Search**        | Focus the search box                               |
 | `` ` ``   | **Log**           | Toggle the bottom status log                       |
 | `r`       | **Refresh**       | Fetch latest library data from Audible             |
 | `:`       | **Palette**       | Open Textual command palette (change themes, etc.) |
