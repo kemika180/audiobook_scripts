@@ -18,7 +18,7 @@ Before running the manager, ensure you have the following installed on your syst
 
 ### 1. FFmpeg
 
-Used for concatenating files and embedding chapters/cover art.
+Used for converting files and embedding chapters/cover art.
 
 - **Linux:** `sudo apt install ffmpeg` (or your distro's equivalent)
 - **macOS:** `brew install ffmpeg`
@@ -53,7 +53,7 @@ uv run audiobook_manager.py
 | `Tab`     | **Tab**           | Cycle focus (Search -> Library -> Log)             |
 | `Enter`   | **Action**        | Download (if missing) or Process (if AAX present)  |
 | `j` / `k` | **Down / Up**     | Move selection one row                             |
-| `d` / `u` | **PgDown / PgUp** | Jump half-page down or up                          |
+| `d` / `u` | **PgDown / PgUp** | Jump a page down or up                             |
 | `h` / `l` | **Left / Right**  | Scroll table horizontally                          |
 | `g` / `G` | **Top / Bottom**  | Jump to the start or end of the list               |
 | `/`       | **Search**        | Focus the filter input                             |
