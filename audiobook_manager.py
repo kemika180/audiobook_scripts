@@ -16,7 +16,7 @@ from pathlib import Path
 from textual.app import App, ComposeResult
 from textual.widgets import Header, Footer, DataTable, TabbedContent, TabPane, Input, Button, Label, Log, Static, RichLog
 from textual.containers import Vertical, Horizontal, Container
-from textual import work, on
+from textual import work, on, events
 from textual.screen import ModalScreen
 
 # Configuration
@@ -98,6 +98,58 @@ class ProcessOutputScreen(ModalScreen):
     def append_log(self, text: str) -> None:
         self.query_one(RichLog).write(text)
 
+class ConfirmModal(ModalScreen):
+    """A modal screen for confirmation."""
+    
+    CSS = """
+    ConfirmModal {
+        align: center middle;
+    }
+    #confirm_modal {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1;
+    }
+    #confirm_msg {
+        text-align: center;
+        width: 100%;
+        margin-bottom: 1;
+    }
+    .modal_buttons {
+        height: auto;
+        align: center middle;
+    }
+    """
+
+    def __init__(self, message: str):
+        super().__init__()
+        self.message = message
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="confirm_modal"):
+            yield Label(self.message, id="confirm_msg")
+            with Horizontal(classes="modal_buttons"):
+                yield Button("Yes", id="btn_yes", variant="error")
+                yield Button("No", id="btn_no", variant="primary")
+
+    @on(Button.Pressed, "#btn_yes")
+    def on_yes(self) -> None:
+        self.dismiss(True)
+
+    @on(Button.Pressed, "#btn_no")
+    def on_no(self) -> None:
+        self.dismiss(False)
+
+class SearchInput(Input):
+    """An Input with custom bindings for navigation."""
+    BINDINGS = [
+        ("escape", "focus_library", "Back"),
+    ]
+    def action_focus_library(self) -> None:
+        self.app.query_one("#library_table").focus()
+
 class StatusLog(Log):
     """A Log with custom bindings for the footer."""
     BINDINGS = [
@@ -111,6 +163,7 @@ class StatusLog(Log):
         ("g", "scroll_top", "Top"),
         ("G", "scroll_bottom", "Bottom"),
         ("/", "focus_search", "Search"),
+        ("tab", "focus_next", "Tab"),
         ("r", "refresh_library", "Refresh"),
         ("`,grave,backtick", "toggle_log", "Log"),
         ("q", "quit", "Quit"),
@@ -145,6 +198,7 @@ class LibraryTable(DataTable):
         ("g", "scroll_top", "Top"),
         ("G", "scroll_bottom", "Bottom"),
         ("/", "focus_search", "Search"),
+        ("tab", "focus_next", "Tab"),
         ("r", "refresh_library", "Refresh"),
         ("`,grave,backtick", "toggle_log", "Log"),
         ("q", "quit", "Quit"),
@@ -250,6 +304,7 @@ class AudiobookManager(App):
     }
     #search_input {
         margin: 0 1;
+        display: none;
     }
     """
 
@@ -278,7 +333,7 @@ class AudiobookManager(App):
 
     def compose(self) -> ComposeResult:
         yield Header()
-        yield Input(placeholder="Filter library (ASIN, Author, or Title)...", id="search_input")
+        yield SearchInput(placeholder="Filter library (ASIN, Author, or Title)...", id="search_input")
         yield LibraryTable(id="library_table")
         yield StatusLog(id="log")
         yield Footer()
@@ -308,6 +363,11 @@ class AudiobookManager(App):
         self.title_col_key = keys[3]
         
         table.cursor_type = "row"
+        table.focus()
+        
+        # Now check if we should show search bar
+        self.update_search_visibility()
+        
         self.action_refresh_library()
 
     def on_focus(self) -> None:
@@ -356,6 +416,49 @@ class AudiobookManager(App):
         except Exception as e:
             self.log_message(f"Error toggling log: {e}")
 
+    def prompt_cleanup(self, asin: str, title: str) -> None:
+        """Prompts the user to delete source files."""
+        msg = f"Conversion complete for '{title}'. Would you like to delete the source files (AAX, JSON, JPG)?"
+        self.push_screen(ConfirmModal(msg), lambda result: self.handle_cleanup_response(result, asin, title))
+
+    def handle_cleanup_response(self, delete: bool, asin: str, title: str) -> None:
+        if delete:
+            self.delete_source_files(asin, title)
+
+    def delete_source_files(self, asin: str, title: str) -> None:
+        """Deletes original files after conversion."""
+        safe_title = sanitize_filename(title)
+        prefixes = [asin, safe_title]
+        deleted_count = 0
+        
+        # Files to target
+        extensions = [".aax", ".json", "-chapters.txt"]
+        
+        for prefix in prefixes:
+            # Delete matched extensions
+            for ext in extensions:
+                matches = glob.glob(f"{prefix}*{ext}")
+                for match in matches:
+                    try:
+                        os.remove(match)
+                        deleted_count += 1
+                    except Exception as e:
+                        self.log_message(f"Error deleting {match}: {e}")
+            
+            # Specifically target JPGs (often have (500) in name)
+            jpg_matches = glob.glob(f"{prefix}*.jpg")
+            for match in jpg_matches:
+                try:
+                    os.remove(match)
+                    deleted_count += 1
+                except Exception as e:
+                    self.log_message(f"Error deleting {match}: {e}")
+
+        if deleted_count > 0:
+            self.log_message(f"Cleaned up {deleted_count} source files for '{title}'.")
+            self.notify(f"Source files deleted for {title}", severity="information")
+            self.refresh_all_statuses()
+
     @work(thread=True)
     def action_refresh_library(self) -> None:
         self.log_message("Fetching library...")
@@ -375,9 +478,32 @@ class AudiobookManager(App):
         except Exception as e:
             self.log_message(f"Error fetching library: {e}")
 
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        """Triggers search visibility update whenever focus changes."""
+        self.update_search_visibility()
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        """Triggers search visibility update whenever focus changes."""
+        self.update_search_visibility()
+
     @on(Input.Changed, "#search_input")
     def on_search_changed(self, event: Input.Changed) -> None:
         self.apply_filter(event.value)
+        self.update_search_visibility()
+
+    @on(Input.Submitted, "#search_input")
+    def on_search_submitted(self) -> None:
+        """Returns focus to the library when Enter is pressed in search."""
+        self.query_one("#library_table").focus()
+
+    def update_search_visibility(self) -> None:
+        """Shows the search input only if it's focused or has content."""
+        try:
+            search_input = self.query_one("#search_input", SearchInput)
+            # Display if focused OR has text
+            search_input.display = search_input.has_focus or len(search_input.value) > 0
+        except Exception:
+            pass
 
     def apply_filter(self, filter_text: str) -> None:
         table = self.query_one("#library_table", LibraryTable)
@@ -577,6 +703,9 @@ class AudiobookManager(App):
                 import time
                 time.sleep(0.5)
                 self.call_from_thread(self.update_row_status, asin)
+                
+                # Prompt for cleanup
+                self.call_from_thread(self.prompt_cleanup, asin, title)
             else:
                 log_to_both(f"[bold red]ffmpeg failed with code {process.returncode}[/]")
         except Exception as e:

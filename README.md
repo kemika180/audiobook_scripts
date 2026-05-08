@@ -50,6 +50,7 @@ uv run audiobook_manager.py
 
 | Key       | Action            | Description                                        |
 | :-------- | :---------------- | :------------------------------------------------- |
+| `Tab`     | **Tab**           | Cycle focus (Search -> Library -> Log)             |
 | `Enter`   | **Action**        | Download (if missing) or Process (if AAX present)  |
 | `j` / `k` | **Down / Up**     | Move selection one row                             |
 | `d` / `u` | **PgDown / PgUp** | Jump half-page down or up                          |
