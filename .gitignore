@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.python-version
+
+# Audiobook Files
+*.aax
+*.m4b
+*.jpg
+*-chapters.json
+*-chapters.txt
+
+# Local Configuration
+audiobook_config.json
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
