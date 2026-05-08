@@ -1,7 +1,7 @@
 # Audiobook Manager TUI
 
-A unified, keyboard-centric terminal user interface for managing your Audible library. Download audiobooks, convert them to M4B with chapters and cover art, and track your local collection—all from a single, streamlined interface.
-
+A unified, keyboard-centric terminal user interface for managing your Audible library. Download audiobooks, convert them to M4B with chapters and cover art, and track your local collection—all from a single, streamlined interface.  
+<br/><img width="1916" height="1028" alt="audiobook tui 2" src="https://github.com/user-attachments/assets/512af169-652d-4466-97da-1e0d249b641e" />
 ## Features
 
 - **Unified Workflow:** One interface to browse, download, and process your library.
