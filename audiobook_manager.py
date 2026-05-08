@@ -10,17 +10,17 @@ import json
 import subprocess
 import glob
 import re
-from typing import List, Dict, Optional
+from typing import List, Dict, Iterable
 from pathlib import Path
 
-from textual.app import App, ComposeResult
-from textual.widgets import Header, Footer, DataTable, TabbedContent, TabPane, Input, Button, Label, Log, Static, RichLog
-from textual.containers import Vertical, Horizontal, Container
+from textual.app import App, ComposeResult, SystemCommand
+from textual.binding import Binding
+from textual.widgets import Header, Footer, DataTable, Input, Button, Label, Log, RichLog, Static
+from textual.containers import Vertical, Horizontal
 from textual import work, on, events
-from textual.screen import ModalScreen
+from textual.screen import ModalScreen, Screen
 
 # Configuration
-ACTIVATION_BYTES = "9c06a105"
 CONFIG_FILE = Path(__file__).parent / "audiobook_config.json"
 
 def load_config() -> Dict:
@@ -31,7 +31,11 @@ def load_config() -> Dict:
                 return data
         except Exception:
             pass
-    return {"theme": "textual-dark", "log_visible": True}
+    return {
+        "theme": "tokyo-night", 
+        "log_visible": True,
+        "activation_bytes": ""
+    }
 
 def save_config(config: Dict):
     try:
@@ -43,7 +47,7 @@ def save_config(config: Dict):
 
 class ProcessOutputScreen(ModalScreen):
     """A modal screen that shows the output of a process."""
-    
+
     CSS = """
     ProcessOutputScreen {
         align: center middle;
@@ -100,7 +104,7 @@ class ProcessOutputScreen(ModalScreen):
 
 class ConfirmModal(ModalScreen):
     """A modal screen for confirmation."""
-    
+
     CSS = """
     ConfirmModal {
         align: center middle;
@@ -150,6 +154,57 @@ class SearchInput(Input):
     def action_focus_library(self) -> None:
         self.app.query_one("#library_table").focus()
 
+class ActivationBytesModal(ModalScreen):
+    """A modal for entering activation bytes."""
+    CSS = """
+    ActivationBytesModal {
+        align: center middle;
+    }
+    #bytes_modal {
+        width: 60;
+        height: auto;
+        background: $surface;
+        border: thick $primary;
+        padding: 1;
+    }
+    #bytes_title {
+        text-align: center;
+        width: 100%;
+        margin-bottom: 1;
+    }
+    """
+    BINDINGS = [
+        ("escape", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, current_value: str = ""):
+        super().__init__()
+        self.current_value = current_value
+
+    def compose(self) -> ComposeResult:
+        with Vertical(id="bytes_modal"):
+            yield Label("Enter Audible Activation Bytes (8 hex chars):", id="bytes_title")
+            yield Input(value=self.current_value, placeholder="e.g. 1a2b3c4d", id="bytes_input")
+            with Horizontal(classes="modal_buttons"):
+                yield Button("Save", id="btn_save", variant="success")
+                yield Button("Cancel", id="btn_cancel", variant="primary")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Button.Pressed, "#btn_save")
+    def on_save(self) -> None:
+        val = self.query_one("#bytes_input", Input).value
+        self.dismiss(val)
+
+    @on(Button.Pressed, "#btn_cancel")
+    def on_cancel(self) -> None:
+        self.dismiss(None)
+
+    @on(Input.Submitted, "#bytes_input")
+    def on_submit(self) -> None:
+        self.on_save()
+
 class StatusLog(Log):
     """A Log with custom bindings for the footer."""
     BINDINGS = [
@@ -163,22 +218,22 @@ class StatusLog(Log):
         ("g", "scroll_top", "Top"),
         ("G", "scroll_bottom", "Bottom"),
         ("/", "focus_search", "Search"),
-        ("tab", "focus_next", "Tab"),
+        Binding("tab", "focus_next", "Tab", show=False),
         ("r", "refresh_library", "Refresh"),
         ("`,grave,backtick", "toggle_log", "Log"),
         ("q", "quit", "Quit"),
     ]
 
-    
+
     def action_perform_action(self) -> None:
         self.app.action_select_row()
-        
+
     def action_toggle_log(self) -> None:
         self.app.action_toggle_log()
-        
+
     def action_focus_search(self) -> None:
         self.app.action_focus_search()
-        
+
     def action_refresh_library(self) -> None:
         self.app.action_refresh_library()
 
@@ -198,7 +253,7 @@ class LibraryTable(DataTable):
         ("g", "scroll_top", "Top"),
         ("G", "scroll_bottom", "Bottom"),
         ("/", "focus_search", "Search"),
-        ("tab", "focus_next", "Tab"),
+        Binding("tab", "focus_next", "Tab", show=False),
         ("r", "refresh_library", "Refresh"),
         ("`,grave,backtick", "toggle_log", "Log"),
         ("q", "quit", "Quit"),
@@ -244,17 +299,17 @@ def sanitize_filename(text: str) -> str:
 def get_local_status(asin: str, title: str) -> str:
     """Checks the filesystem for the status of a book."""
     safe_title = sanitize_filename(title)
-    
+
     # Check for M4B
     m4b_path = Path(f"{safe_title}.m4b")
     if m4b_path.exists():
         return "[bold green]✔[/]"
-    
+
     # Check for AAX
     aax_matches = glob.glob(f"{asin}*.aax") or glob.glob(f"{safe_title}*.aax")
     if aax_matches:
         return "[bold yellow]⬇[/]"
-    
+
     return ""
 
 def convert_chapters_json_to_ffmetadata(json_data: Dict) -> List[str]:
@@ -309,7 +364,11 @@ class AudiobookManager(App):
     """
 
     TITLE = "Audiobook Manager"
-    BINDINGS = []
+    COMMAND_PALETTE_BINDING = ":"
+
+    BINDINGS = [
+        ("q", "quit", "Quit"),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -343,17 +402,17 @@ class AudiobookManager(App):
         saved_theme = self.config.get("theme", "textual-dark")
         if saved_theme == "dark":
             saved_theme = "textual-dark"
-        
+
         self.theme = saved_theme
-        
+
         # Restore log visibility
         log = self.query_one("#log")
         log.display = self.config.get("log_visible", True)
-        
+
         # If config didn't exist, create it now
         if not CONFIG_FILE.exists():
             save_config(self.config)
-        
+
         table = self.query_one("#library_table", LibraryTable)
         # Store column keys for later reliable updates
         keys = table.add_columns("", "ASIN", "Author", "Title")
@@ -361,18 +420,26 @@ class AudiobookManager(App):
         self.asin_col_key = keys[1]
         self.author_col_key = keys[2]
         self.title_col_key = keys[3]
-        
+
         table.cursor_type = "row"
         table.focus()
-        
+
         # Now check if we should show search bar
         self.update_search_visibility()
-        
+
         self.action_refresh_library()
 
     def on_focus(self) -> None:
         """Refresh statuses whenever the app gets focus."""
         self.refresh_all_statuses()
+
+    def get_system_commands(self, screen: Screen) -> Iterable[SystemCommand]:
+        yield from super().get_system_commands(screen)
+        yield SystemCommand(
+            "Set Activation Bytes",
+            "Enter your Audible activation bytes for decryption",
+            self.action_set_activation_bytes
+        )
 
     def action_cursor_down(self) -> None:
         self.query_one("#library_table").action_cursor_down()
@@ -404,6 +471,17 @@ class AudiobookManager(App):
     def action_quit(self) -> None:
         self.exit()
 
+    def action_set_activation_bytes(self) -> None:
+        """Prompts the user to enter their activation bytes."""
+        def check_input(bytes_val: str | None) -> None:
+            if bytes_val:
+                self.config["activation_bytes"] = bytes_val.strip()
+                save_config(self.config)
+                self.notify("Activation bytes saved.", severity="information")
+                self.log_message(f"Activation bytes updated.")
+
+        self.push_screen(ActivationBytesModal(self.config.get("activation_bytes", "")), check_input)
+
     def action_select_row(self) -> None:
         self.query_one("#library_table").action_select_cursor()
 
@@ -430,10 +508,10 @@ class AudiobookManager(App):
         safe_title = sanitize_filename(title)
         prefixes = [asin, safe_title]
         deleted_count = 0
-        
+
         # Files to target
         extensions = [".aax", ".json", "-chapters.txt"]
-        
+
         for prefix in prefixes:
             # Delete matched extensions
             for ext in extensions:
@@ -444,7 +522,7 @@ class AudiobookManager(App):
                         deleted_count += 1
                     except Exception as e:
                         self.log_message(f"Error deleting {match}: {e}")
-            
+
             # Specifically target JPGs (often have (500) in name)
             jpg_matches = glob.glob(f"{prefix}*.jpg")
             for match in jpg_matches:
@@ -472,7 +550,7 @@ class AudiobookManager(App):
                     self.full_library_data.append((parts[0], parts[1], parts[2]))
                 elif len(parts) == 2:
                      self.full_library_data.append((parts[0], "Unknown", parts[1]))
-            
+
             self.call_from_thread(self.apply_filter, "")
             self.log_message("Library refreshed.")
         except Exception as e:
@@ -509,7 +587,7 @@ class AudiobookManager(App):
         table = self.query_one("#library_table", LibraryTable)
         table.clear()
         filter_text = filter_text.lower()
-        
+
         for row in self.full_library_data:
             asin, author, title = row
             if any(filter_text in field.lower() for field in row):
@@ -533,7 +611,7 @@ class AudiobookManager(App):
                     self.log_message(f"Updated status for '{title}' to {new_status}")
                     found = True
                     break
-            
+
             if not found:
                 self.log_message(f"ASIN {asin} not in current view, status will update on next search.")
         except Exception as e:
@@ -558,9 +636,9 @@ class AudiobookManager(App):
         row_data = event.data_table.get_row_at(event.cursor_row)
         asin = row_data[1]
         title = row_data[3]
-        
+
         status = get_local_status(asin, title)
-        
+
         if status == "": # Not downloaded
             self.download_book(asin)
         elif "⬇" in status: # Downloaded (AAX) but not processed
@@ -573,7 +651,7 @@ class AudiobookManager(App):
         self.log_message(f"Starting download for {asin}...")
         screen = ProcessOutputScreen(f"Downloading {asin}")
         self.call_from_thread(self.push_screen, screen)
-        
+
         try:
             cmd = ["audible", "download", "-a", asin, "--aax", "--cover", "--chapter", "--filename-mode", "asin_only", "-y"]
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -597,10 +675,17 @@ class AudiobookManager(App):
 
     @work(thread=True)
     def process_book(self, asin: str, title: str) -> None:
+        # Check for activation bytes first
+        activation_bytes = self.config.get("activation_bytes", "")
+        if not activation_bytes:
+            self.log_message("[bold red]Activation bytes not set![/]")
+            self.notify("Please set activation bytes in settings (':' -> 'set activation bytes')", severity="error")
+            return
+
         self.log_message(f"Starting process for {asin}...")
         screen = ProcessOutputScreen(f"Processing {title}")
         self.call_from_thread(self.push_screen, screen)
-        
+
         def log_to_both(msg: str):
             self.log_message(msg)
             self.call_from_thread(screen.append_log, msg)
@@ -608,7 +693,7 @@ class AudiobookManager(App):
         # Determine prefix (could be ASIN or Title)
         safe_title = sanitize_filename(title)
         potential_prefixes = [asin, safe_title]
-        
+
         json_path = None
         for prefix in potential_prefixes:
             matches = glob.glob(f"{prefix}*.json")
@@ -618,7 +703,7 @@ class AudiobookManager(App):
                 if matches:
                     json_path = Path(matches[0])
                     break
-        
+
         if not json_path:
             log_to_both("[bold red]Chapter JSON not found. Please download first.[/]")
             return
@@ -635,7 +720,6 @@ class AudiobookManager(App):
             log_to_both(f"[bold red]Error converting chapters: {e}[/]")
             return
 
-        # 2. Find AAX and Cover
         aax_path = None
         for prefix in potential_prefixes:
             matches = glob.glob(f"{prefix}*.aax")
@@ -646,26 +730,25 @@ class AudiobookManager(App):
         if not aax_path:
              log_to_both(f"[bold red]AAX not found for {asin} or {safe_title}[/]")
              return
-        
+
         cover_path = None
         for prefix in potential_prefixes:
             matches = glob.glob(f"{prefix}*.jpg")
             if matches:
                 cover_path = Path(matches[0])
                 break
-        
+
         if cover_path:
             log_to_both(f"Found cover at {cover_path}")
-        
-        # 3. Build M4B
+
         output_path = Path(f"{asin}.m4b")
         cmd = [
             "ffmpeg", "-y",
-            "-activation_bytes", ACTIVATION_BYTES,
+            "-activation_bytes", activation_bytes,
             "-i", str(aax_path),
             "-i", str(meta_path)
         ]
-        
+
         if cover_path:
             cmd.extend(["-i", str(cover_path)])
             cmd.extend([
@@ -684,9 +767,9 @@ class AudiobookManager(App):
                 "-map", "0:a",
                 "-c:a", "copy"
             ])
-            
+
         cmd.append(str(output_path))
-        
+
         log_to_both(f"Running ffmpeg: {' '.join(cmd)}")
         try:
             process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -703,7 +786,7 @@ class AudiobookManager(App):
                 import time
                 time.sleep(0.5)
                 self.call_from_thread(self.update_row_status, asin)
-                
+
                 # Prompt for cleanup
                 self.call_from_thread(self.prompt_cleanup, asin, title)
             else:

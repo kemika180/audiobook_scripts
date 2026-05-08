@@ -59,12 +59,20 @@ uv run audiobook_manager.py
 | `/`       | **Search**        | Focus the filter input                             |
 | `` ` ``   | **Log**           | Toggle the bottom status log                       |
 | `r`       | **Refresh**       | Fetch latest library data from Audible             |
-| `Ctrl+p`  | **Palette**       | Open Textual command palette (change themes, etc.) |
+| `:`       | **Palette**       | Open Textual command palette (change themes, etc.) |
 | `q`       | **Quit**          | Exit the application                               |
 
 ## Configuration
 
-The application stores your theme preference and log visibility in `audiobook_config.json` located in the same directory as the script.
+The application stores your theme preference, log visibility, and activation bytes in `audiobook_config.json` located in the same directory as the script.
+
+### Setting Activation Bytes
+To decrypt and convert Audible files, you must provide your 8-character hex activation bytes:
+1. Launch the manager: `uv run audiobook_manager.py`
+2. Open the **Command Palette** using `:` and type `Set Activation Bytes`.
+3. Enter your 8-character hex code and select **Save**.
+
+These bytes are stored locally on your machine and are not shared or committed to the repository.
 
 ## Technical Details
 
