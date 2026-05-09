@@ -30,24 +30,26 @@ def sanitize_filename(text: str) -> str:
     # Truncate to avoid issues with long paths (leaving room for extension)
     return text[:200] if text else "unnamed_audiobook"
 
-def convert_chapters_json_to_ffmetadata(json_data: dict) -> list[str]:
-    """Converts Audible chapter JSON to FFMETADATA format."""
+def convert_chapters_json_to_ffmetadata(json_data: dict, tags: dict = None) -> list[str]:
+    """Converts Audible chapter JSON to FFMETADATA format with optional global tags."""
+    def _escape(text: str) -> str:
+        return text.translate(
+            str.maketrans({
+                "\\": r"\\",
+                "\n": r"\\n",
+                "#":  r"\#",
+                ";":  r"\;",
+                "=":  r"\="
+            }))
+
     def _convert_recursive(chapters: list[dict]) -> list[str]:
         output = []
         for item in chapters:
             start_time = int(item['start_offset_ms'])
             duration = int(item['length_ms'])
             end_time = start_time + duration
-            title_str = str(item['title'])
-            # Escape special characters for FFMETADATA
-            title_str = title_str.translate(
-                str.maketrans({
-                    "\\": r"\\",
-                    "\n": r"\\n",
-                    "#":  r"\#",
-                    ";":  r"\;",
-                    "=":  r"\="
-                }))
+            title_str = _escape(str(item['title']))
+            
             output.append("")
             output.append("[CHAPTER]")
             output.append("TIMEBASE=1/1000")
@@ -58,7 +60,14 @@ def convert_chapters_json_to_ffmetadata(json_data: dict) -> list[str]:
                 output.extend(_convert_recursive(item['chapters']))
         return output
 
-    chapters = json_data['content_metadata']['chapter_info']['chapters']
     output_list = [";FFMETADATA1"]
+    
+    # Add Global Tags
+    if tags:
+        for key, val in tags.items():
+            if val:
+                output_list.append(f"{key.upper()}={_escape(str(val))}")
+
+    chapters = json_data['content_metadata']['chapter_info']['chapters']
     output_list.extend(_convert_recursive(chapters))
     return output_list

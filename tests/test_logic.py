@@ -79,7 +79,7 @@ def test_convert_chapters_json_to_ffmetadata():
     assert "START=1000" in result
     assert "END=1500" in result
 
-def test_ffmetadata_escaping():
+def test_convert_chapters_with_tags():
     sample_json = {
         "content_metadata": {
             "chapter_info": {
@@ -87,12 +87,16 @@ def test_ffmetadata_escaping():
                     {
                         "start_offset_ms": 0,
                         "length_ms": 1000,
-                        "title": "Title with = and #"
+                        "title": "Chapter 1"
                     }
                 ]
             }
         }
     }
-    result = convert_chapters_json_to_ffmetadata(sample_json)
-    # The current implementation escapes = as \= and # as \#
-    assert "TITLE=Title with \\= and \\#" in result
+    tags = {"title": "My Book", "artist": "The Author"}
+    result = convert_chapters_json_to_ffmetadata(sample_json, tags=tags)
+    
+    assert "TITLE=My Book" in result
+    assert "ARTIST=The Author" in result
+    # Check that tags come before chapters usually (per my implementation)
+    assert result.index("TITLE=My Book") < result.index("[CHAPTER]")

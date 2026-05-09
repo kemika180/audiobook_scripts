@@ -18,7 +18,12 @@ class AudiobookService:
 
     @property
     def activation_bytes(self) -> str:
-        return self.config.get("activation_bytes", "")
+        """Returns sanitized activation bytes (8 hex chars, no 0x prefix)."""
+        raw = self.config.get("activation_bytes", "").strip().lower()
+        if raw.startswith("0x"):
+            raw = raw[2:]
+        # Remove any non-hex characters just in case
+        return re.sub(r'[^0-9a-f]', '', raw)
 
     async def is_authenticated(self) -> bool:
         """Checks if audible-cli has an active/configured profile."""
@@ -65,63 +70,97 @@ class AudiobookService:
 
         return ""
 
-    def verify_file_exists(self, path: Path, timeout: float = 2.0) -> bool:
+    async def verify_file_exists(self, path: Path, timeout: float = 2.0) -> bool:
         """Polls for a file's existence for a limited time."""
         import time
         start = time.time()
         while time.time() - start < timeout:
             if path.exists():
                 return True
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
         return False
 
-    def fetch_library(self) -> List[Audiobook]:
-        """Fetches the library using audible-cli with a robust regex parser."""
+    async def fetch_library(self) -> List[Audiobook]:
+        """Fetches the library using the Audible JSON API for robust data."""
         try:
-            output = subprocess.check_output(
-                ["audible", "library", "list"], 
-                text=True, 
-                stderr=subprocess.PIPE
+            # We use product_desc for the title and series for series info
+            cmd = [
+                "audible", "api", "/1.0/library",
+                "-p", "num_results=1000",
+                "-p", "response_groups=product_details,product_desc,contributors,series"
+            ]
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
             )
+            stdout, stderr = await process.communicate()
+            
+            if process.returncode != 0:
+                raise RuntimeError(f"Audible API failed: {stderr.decode().strip()}")
+
+            data = json.loads(stdout.decode())
+            items = data.get("items", [])
             books = []
             
             # Pre-list directory for faster status checks
             lib = self.library_path
             file_set = {f.name for f in lib.iterdir()} if lib.exists() else set()
 
-            # Pattern: ASIN: Author: Title
-            pattern = re.compile(r'^([^:]+):\s*([^:]+):\s*(.*)$')
-            
-            for line in output.strip().split('\n'):
-                if not line: continue
+            for item in items:
+                asin = item.get("asin", "")
+                title = item.get("title") or "Unknown Title"
                 
-                match = pattern.match(line)
-                if match:
-                    asin, author, title = match.groups()
-                    status = self.get_status(asin.strip(), title.strip(), file_set=file_set)
-                    books.append(Audiobook(
-                        asin=asin.strip(), 
-                        author=author.strip(), 
-                        title=title.strip(), 
-                        status=status
-                    ))
-                else:
-                    # Fallback for lines that don't match the 3-part format
-                    parts = line.split(': ', 1)
-                    if len(parts) == 2:
-                        asin, title = parts
-                        status = self.get_status(asin.strip(), title.strip(), file_set=file_set)
-                        books.append(Audiobook(
-                            asin=asin.strip(), 
-                            author="Unknown", 
-                            title=title.strip(), 
-                            status=status
-                        ))
+                # Extract authors
+                authors_list = item.get("authors", [])
+                author = ", ".join([a.get("name", "") for a in authors_list if a.get("name")])
+                if not author:
+                    author = "Unknown Author"
+                
+                # Extract narrators
+                narrators_list = item.get("narrators", [])
+                narrator = ", ".join([n.get("name", "") for n in narrators_list if n.get("name")])
+                if not narrator:
+                    narrator = "Unknown Narrator"
+
+                # Extract year from date_first_available (e.g., "2021-10-19")
+                year = ""
+                date_str = item.get("date_first_available", "")
+                if date_str and len(date_str) >= 4:
+                    year = date_str[:4]
+
+                # Extract duration
+                duration_ms = 0
+                runtime = item.get("runtime_length_min")
+                if runtime:
+                    duration_ms = int(runtime) * 60 * 1000
+
+                # Extract series
+                series_list = item.get("series", [])
+                series_title = ""
+                series_sequence = ""
+                if series_list:
+                    series_title = series_list[0].get("title", "")
+                    series_sequence = series_list[0].get("sequence", "")
+
+                status = self.get_status(asin, title, file_set=file_set)
+                
+                books.append(Audiobook(
+                    asin=asin,
+                    author=author,
+                    title=title,
+                    narrator=narrator,
+                    year=year,
+                    duration_ms=duration_ms,
+                    series_title=series_title,
+                    series_sequence=series_sequence,
+                    status=status
+                ))
                     
             return books
-        except subprocess.CalledProcessError as e:
-            raise RuntimeError(f"Audible CLI failed: {e.stderr.strip() if e.stderr else e}") from e
         except Exception as e:
+            if isinstance(e, RuntimeError):
+                raise
             raise RuntimeError(f"Unexpected error fetching library: {e}") from e
 
     async def download(self, asin: str, log_callback: Callable[[str], None]) -> int:
@@ -194,31 +233,80 @@ class AudiobookService:
                 cover_path = matches[0]
                 break
 
+        meta_path = None
         # 4. Prepare Metadata
         try:
-            with open(json_path, 'r') as f:
+            with open(json_path, 'r', encoding='utf-8') as f:
                 json_data = json.load(f)
-            ffmetadata = convert_chapters_json_to_ffmetadata(json_data)
             
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.txt', delete=False) as tmp_meta:
+            # Calculate duration from chapters for accurate processing progress
+            def get_total_duration(chapters):
+                total = 0
+                for c in chapters:
+                    total += int(c.get('length_ms', 0))
+                    if 'chapters' in c:
+                        # Only top-level chapters for duration usually, but let's be safe
+                        pass 
+                return total
+            
+            # Sum up top-level chapters
+            ch_list = json_data.get('content_metadata', {}).get('chapter_info', {}).get('chapters', [])
+            book.duration_ms = sum(int(c.get('length_ms', 0)) for c in ch_list)
+
+            # Prepare tags for cleaner metadata
+            tags = {
+                "title": book.title,
+                "artist": book.author,
+                "album": book.series_title if book.series_title else book.title,
+                "genre": "Audiobook",
+                "comment": f"ASIN: {book.asin}",
+                "composer": book.narrator,
+                "date": book.year
+            }
+            ffmetadata = convert_chapters_json_to_ffmetadata(json_data, tags=tags)
+            
+            # Use .ffmetadata suffix and explicit utf-8 encoding
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.ffmetadata', delete=False, encoding='utf-8') as tmp_meta:
                 tmp_meta.write('\n'.join(ffmetadata))
+                tmp_meta.write('\n') # Ensure trailing newline
                 meta_path = Path(tmp_meta.name)
             log_callback(f"Prepared metadata: {meta_path.name}")
         except Exception as e:
             log_callback(f"[bold red]Metadata error: {e}[/]")
             return False
 
-        # 5. Build FFmpeg command
-        output_path = lib / f"{book.asin}.m4b"
-        cmd = ["ffmpeg", "-y", "-activation_bytes", self.activation_bytes, "-i", str(aax_path), "-i", str(meta_path)]
-        if cover_path:
-            cmd.extend(["-i", str(cover_path), "-map_metadata", "0", "-map_chapters", "1", "-map", "0:a", "-map", "2:v", "-c:a", "copy", "-c:v", "copy", "-disposition:v:0", "attached_pic"])
-        else:
-            cmd.extend(["-map_metadata", "0", "-map_chapters", "1", "-map", "0:a", "-c:a", "copy"])
-        cmd.append(str(output_path))
-
-        # 6. Run FFmpeg
         try:
+            # 5. Build FFmpeg command
+            output_path = lib / f"{book.asin}.m4b"
+            # -activation_bytes is an input option for aax, placed before -i
+            # We remove forced -f aax as auto-detection is usually more robust
+            cmd = ["ffmpeg", "-y", "-activation_bytes", self.activation_bytes, "-i", str(aax_path), "-f", "ffmetadata", "-i", str(meta_path)]
+            
+            if cover_path:
+                cmd.extend(["-i", str(cover_path)])
+                # Map audio from 0, metadata from 1, cover from 2
+                # -map_metadata -1 strips all metadata first
+                # -map_metadata 1 then applies our clean metadata file
+                cmd.extend([
+                    "-map", "0:a", "-map", "2:v", 
+                    "-map_metadata", "-1", "-map_metadata", "1", 
+                    "-map_chapters", "1",
+                    "-c:a", "copy", "-c:v", "copy", 
+                    "-disposition:v:0", "attached_pic"
+                ])
+            else:
+                cmd.extend([
+                    "-map", "0:a", 
+                    "-map_metadata", "-1", "-map_metadata", "1", 
+                    "-map_chapters", "1",
+                    "-c:a", "copy"
+                ])
+            
+            # Optimization: faststart
+            cmd.extend(["-movflags", "+faststart"])
+            cmd.append(str(output_path))
+
+            # 6. Run FFmpeg
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -243,8 +331,6 @@ class AudiobookService:
             
             return_code = await process.wait()
             
-            if meta_path.exists(): meta_path.unlink()
-
             if return_code == 0:
                 final_path = lib / f"{safe_title}.m4b"
                 try:
@@ -254,9 +340,11 @@ class AudiobookService:
                 return True
             return False
         except Exception as e:
-            if 'meta_path' in locals() and meta_path.exists(): meta_path.unlink()
             log_callback(f"[bold red]FFmpeg error: {e}[/]")
             return False
+        finally:
+            if meta_path and meta_path.exists():
+                meta_path.unlink()
 
     def cleanup_sources(self, book: Audiobook, log_callback):
         """Deletes original files after conversion."""
