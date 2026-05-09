@@ -90,10 +90,3 @@ To decrypt and convert Audible files, you must provide your 8-character hex acti
 1. Launch the manager: `uv run audiobook_manager.py`
 2. Open the **Command Palette** using `:` and type `Set Activation Bytes`.
 3. Enter your 8-character hex code and select **Save**.
-
-## Technical Details
-
-- **Modular Architecture:** Split into clean modules (`models`, `service`, `ui`, `utils`) for easier maintenance.
-- **Asynchronous I/O:** Uses `asyncio` subprocesses to handle high-bandwidth tool output without UI stutter.
-- **Safe State Management:** Background workers use `try...finally` to ensure UI state consistency even if tools fail.
-- **Cross-Platform Playback:** Uses `xdg-open`, `open`, or `os.startfile` based on the host OS.
