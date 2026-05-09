@@ -18,6 +18,7 @@ class NavigationMixin:
         Binding("tab", "focus_next", "Tab", show=False),
         ("r", "refresh_library", "Refresh"),
         Binding("x", "remove_from_queue", "Dequeue", show=False),
+        Binding("~", "show_queue", "Queue", show=False),
         ("`,grave,backtick", "toggle_log", "Log"),
         ("q", "quit", "Quit"),
     ]
@@ -36,6 +37,9 @@ class NavigationMixin:
 
     def action_remove_from_queue(self) -> None:
         self.app.action_remove_from_queue()
+
+    def action_show_queue(self) -> None:
+        self.app.action_show_queue()
 
     def action_quit(self) -> None:
         self.app.action_quit()

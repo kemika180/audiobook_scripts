@@ -70,6 +70,7 @@ uv run audiobook_manager.py
 | `/`       | **Search**        | Focus the search box                                     |
 | `` ` ``   | **Log**           | Toggle the bottom status log                             |
 | `r`       | **Refresh**       | Fetch latest library data from Audible                   |
+| `~`       | **Queue**         | View the background task queue and progress              |
 | `:`       | **Palette**       | Open Command Palette (Configure columns, settings, etc.) |
 | `q`       | **Quit**          | Exit the application                                     |
 
