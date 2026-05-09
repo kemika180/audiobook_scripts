@@ -54,7 +54,24 @@ Then, simply run the manager using `uv`:
 uv run audiobook_manager.py
 ```
 
-`uv` will automatically create a virtual environment, install `textual`, and launch the application.
+`uv` will automatically create a virtual environment, install all dependencies, and launch the application.
+
+### Activation Bytes
+
+To convert your Audible files into DRM-free `.m4b` format, you need your unique 8-character hex activation code. 
+
+- **Finding your bytes:** You can retrieve these using `audible-cli` by running `audible activation-bytes` in your terminal.
+- **Setting your bytes:** In the manager, press `:` to open the Command Palette and select **Set Activation Bytes**. This only needs to be done once.
+
+### Updating
+
+To update the manager to the latest version, pull the latest changes from GitHub:
+
+```bash
+git pull
+```
+
+Since the project uses `uv`, it will automatically handle any new dependencies the next time you run the application.
 
 ## Key Bindings
 
