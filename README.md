@@ -42,13 +42,28 @@ This project uses `uv` to manage Python dependencies automatically.
 
 ## Getting Started
 
-Simply run the manager using `uv`:
+First, clone the repository to your local machine:
+
+```bash
+git clone https://github.com/kemika180/audiobook_scripts.git
+cd audiobook_scripts
+```
+
+Then, simply run the manager using `uv`:
 
 ```bash
 uv run audiobook_manager.py
 ```
 
 `uv` will automatically create a virtual environment, install `textual`, and launch the application.
+
+## Updating
+
+To update to the latest version, run the following commands in your local repository folder:
+
+```bash
+git pull
+```
 
 ## Key Bindings
 
