@@ -184,8 +184,8 @@ class AudiobookManager(App):
         
         for col in visible:
             label = "" if col == "Status" else col
-            # Ultra-compact status column (4 chars)
-            width = 4 if col == "Status" else None
+            # Ultra-compact status column (3 chars)
+            width = 3 if col == "Status" else None
             key = table.add_column(label, width=width)
             self.col_keys[col] = key
 
@@ -218,29 +218,29 @@ class AudiobookManager(App):
             self.task_queue.task_done()
 
     def _get_status_display(self, book: Audiobook) -> str:
-        """Generates an ultra-compact (4 char) status string using symbols."""
+        """Generates an ultra-compact (3 char) status string using symbols."""
         frame = SPINNER_FRAMES[book.spinner_frame]
         
         if book.working_mode == "downloading":
-            return f" [blue]{frame}[/][bold blue]⬇[/] "
+            return f" [blue]{frame}[/][bold blue]⬇[/]"
         elif book.working_mode == "processing":
-            return f" [cyan]{frame}[/][bold cyan]⚙[/] "
+            return f" [cyan]{frame}[/][bold cyan]⚙[/]"
         elif book.working_mode == "queued_download":
-            return "  [bold yellow]⬇[/] "
+            return " [bold yellow]⬇[/] "
         elif book.working_mode == "queued_processing":
-            return "  [bold yellow]⚙[/] "
+            return " [bold yellow]⚙[/] "
         elif book.working_mode == "queued": # Fallback
-            return " ⏳  "
+            return " ⏳ "
         
         # Static statuses
         if "✔" in book.status:
-            return "  [bold green]✔[/] "
+            return " [bold green]✔[/] "
         elif "⬇" in book.status:
-            return "  [bold green]⬇[/] "
+            return " [bold green]⬇[/] "
         elif "⚙" in book.status:
-            return "  [bold yellow]⚙[/] "
+            return " [bold yellow]⚙[/] "
             
-        return "    "
+        return "   "
 
     def animate_spinners(self) -> None:
         """Updates the spinner frame for all working books."""

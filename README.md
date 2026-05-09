@@ -113,14 +113,14 @@ The manager is highly configurable via the **Command Palette**. Press `:` at any
 | `:`       | **Palette**       | Open Command Palette (Configure columns, settings, etc.)  |
 | `q`       | **Quit**          | Exit the application                                      |
 
-## Status Indicators (Compact 4-char Column)
+## Status Indicators (Compact 3-char Column)
 
-- **`⠋⬇`** (Blue): Actively **Downloading**.
-- **`⠋⚙`** (Cyan): Actively **Processing** (FFmpeg).
-- **` ⬇`** (Yellow): Queued for download.
-- **` ⚙`** (Yellow): Queued for processing.
-- **` ⬇`** (Green): Downloaded & ready to process.
-- **` ✔`** (Green): Fully processed and ready to play.
+- **` ⠋⬇`** (Blue): Actively **Downloading**.
+- **` ⠋⚙`** (Cyan): Actively **Processing** (FFmpeg).
+- **` ⬇ `** (Yellow): Queued for download.
+- **` ⚙ `** (Yellow): Queued for processing.
+- **` ⬇ `** (Green): Downloaded & ready to process.
+- **` ✔ `** (Green): Fully processed and ready to play.
 
 ## Configuration
 
