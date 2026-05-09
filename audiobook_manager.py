@@ -124,7 +124,7 @@ class AudiobookManager(App):
                 self.config["theme"] = theme
                 res = save_config(self.config)
                 if res is not True:
-                    self.log_message(f"Failed to save theme: {res}")
+                    self.log_message(f"[bold red]Failed to save theme[/]: {res}")
                 else:
                     self.log_message(f"Theme saved: {theme}")
 
@@ -506,7 +506,7 @@ class AudiobookManager(App):
         book.working_mode = ""
         self.update_row_status(asin)
         self.notify(f"Removed '{book.title}' from queue.", severity="information")
-        self.log_message(f"Removed {asin} from task queue.")
+        self.log_message(f"Removed [bold cyan]{asin}[/] from task queue.")
 
     def action_toggle_log(self) -> None:
         try:
@@ -535,7 +535,7 @@ class AudiobookManager(App):
         count = self.service.cleanup_sources(book, self.log_message)
 
         if count > 0:
-            self.log_message(f"Cleaned up {count} source files for '{title}'.")
+            self.log_message(f"Cleaned up [bold cyan]{count}[/] source files for [bold green]'{title}'[/].")
             self.notify(f"Source files deleted for {title}", severity="information")
             self.refresh_all_statuses()
 
@@ -545,9 +545,9 @@ class AudiobookManager(App):
         try:
             self.full_library = await self.service.fetch_library()
             self.apply_filter(self.search_query)
-            self.log_message(f"Library refreshed ({len(self.full_library)} items).")
+            self.log_message(f"Library refreshed ([bold cyan]{len(self.full_library)}[/] items).")
         except Exception as e:
-            self.log_message(f"Error fetching library: {e}")
+            self.log_message(f"[bold red]Error fetching library: {e}[/]")
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         """Triggers search visibility update whenever focus changes."""
@@ -772,7 +772,7 @@ class AudiobookManager(App):
                 success, error = self.service.play_audiobook(book)
                 if success:
                     self.notify(f"Opening '{title}'...", severity="information")
-                    self.log_message(f"Opened '{title}' in default player.")
+                    self.log_message(f"Opened [bold green]'{title}'[/] in default player.")
                 else:
                     self.notify(f"Could not open file: {error}", severity="error")
                     self.log_message(f"Error opening '{title}': {error}")
@@ -797,7 +797,7 @@ class AudiobookManager(App):
             book.working_mode = "downloading"
             self.update_row_status(asin)
 
-        self.log_message(f"Starting download for {asin}...")
+        self.log_message(f"Starting download for [bold cyan]{asin}[/]...")
         self.active_logs[asin] = {
             "title": f"Downloading {asin}",
             "history": []
@@ -813,7 +813,7 @@ class AudiobookManager(App):
         try:
             res = await self.service.download(asin, log_handler)
             if res == 0:
-                self.log_message(f"Download of {asin} complete.")
+                self.log_message(f"Download of [bold cyan]{asin}[/] complete.")
                 log_handler("\n[bold green]Download Complete![/]")
                 lib = self.service.library_path
                 await self.service.verify_file_exists(lib / f"{asin}*.aax")
@@ -825,7 +825,7 @@ class AudiobookManager(App):
                         await self.process_book(asin, book.title)
             else:
 
-                self.log_message(f"Download of {asin} failed with code {res}")
+                self.log_message(f"Download of [bold cyan]{asin}[/] failed with code {res}")
                 log_handler(f"\n[bold red]Failed with code {res}[/]")
         finally:
             if book:
