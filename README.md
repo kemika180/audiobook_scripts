@@ -15,7 +15,6 @@ A unified, keyboard-centric terminal user interface for managing your Audible li
   - `✔` (Green): Fully processed and ready to play.
 - **Persistent Progress Logging:** View detailed logs for any active task by selecting it. History is preserved even if you close the modal.
 - **Vim-style Navigation:** Full support for `h/j/k/l`, `u/d`, `g/G`, plus **Vim-style scrolloff** (5 rows of context).
-- **Optimized Performance:** High-performance library refreshes using $O(1)$ filesystem lookups and background status workers.
 
 ## Prerequisites
 
