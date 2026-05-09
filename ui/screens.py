@@ -52,7 +52,7 @@ class ProcessOutputScreen(ModalScreen):
     def compose(self) -> ComposeResult:
         with Vertical(id="process_modal"):
             yield Label(self.process_title, id="modal_title")
-            yield RichLog(id="process_log", highlight=True, markup=True)
+            yield RichLog(id="process_log", highlight=False, markup=True)
             yield Button("Close", id="close_btn", variant="primary")
 
     def on_mount(self) -> None:

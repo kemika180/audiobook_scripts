@@ -132,7 +132,7 @@ class AudiobookManager(App):
         yield Header()
         yield SearchInput(placeholder="Filter library (ASIN, Author, or Title)...", id="search_input")
         yield LibraryTable(id="library_table")
-        yield StatusLog(id="log", markup=True, highlight=True)
+        yield StatusLog(id="log", markup=True, highlight=False)
         yield Footer()
 
     def on_mount(self) -> None:
@@ -226,19 +226,19 @@ class AudiobookManager(App):
         elif book.working_mode == "processing":
             return f" [cyan]{frame}[/][bold cyan]⚙[/]"
         elif book.working_mode == "queued_download":
-            return " [bold yellow]⬇[/] "
+            return "  [bold yellow]⬇[/] "
         elif book.working_mode == "queued_processing":
-            return " [bold yellow]⚙[/] "
+            return "  [bold yellow]⚙[/] "
         elif book.working_mode == "queued": # Fallback
-            return " ⏳ "
+            return "  ⏳"
         
         # Static statuses
         if "✔" in book.status:
             return " [bold green]✔[/] "
         elif "⬇" in book.status:
-            return " [bold green]⬇[/] "
+            return "  [bold green]⬇[/] "
         elif "⚙" in book.status:
-            return " [bold yellow]⚙[/] "
+            return "  [bold yellow]⚙[/] "
             
         return "   "
 

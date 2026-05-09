@@ -356,7 +356,7 @@ class AudiobookService:
                     try:
                         match.unlink()
                         count += 1
-                        log_callback(f"Deleted: {match.name}")
+                        log_callback(f"[dim]Deleted: {match.name}[/]")
                     except Exception:
                         pass
         return count
