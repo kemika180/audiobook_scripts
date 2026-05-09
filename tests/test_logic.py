@@ -1,6 +1,6 @@
 import pytest
 import re
-from audiobook_manager import sanitize_filename, convert_chapters_json_to_ffmetadata
+from utils import sanitize_filename, convert_chapters_json_to_ffmetadata
 
 def test_audible_parsing_regex():
     # Simulate the regex used in the service
