@@ -89,9 +89,9 @@ The manager is highly configurable via the **Command Palette**. Press `:` at any
 
 - **Set Activation Bytes:** Enter your 8-character Audible activation code. This is required for converting downloads to M4B.
 - **Set Library Directory:** Choose the local folder where your audiobooks, metadata, and covers will be stored.
-- **General Automation Settings:** 
-    - **Auto-process:** Automatically start the M4B conversion as soon as a download completes.
-    - **Auto-cleanup:** Automatically delete the original Audible source files (AAX) after a successful conversion to save disk space.
+- **General Automation Settings:**
+  - **Auto-process:** Automatically start the M4B conversion as soon as a download completes.
+  - **Auto-cleanup:** Automatically delete the original Audible source files (AAX) after a successful conversion to save disk space.
 - **Configure Library Columns:** Select which columns are visible in the main table (e.g., Narrator, Series, Year) to optimize for your terminal size.
 - **Sorting:** Click on any column header to sort the library. The manager supports multi-level sorting and remembers your preferences between sessions.
 
@@ -115,12 +115,12 @@ The manager is highly configurable via the **Command Palette**. Press `:` at any
 
 ## Status Indicators (Compact 3-char Column)
 
-- **` ⠋⬇`** (Blue): Actively **Downloading**.
-- **` ⠋⚙`** (Cyan): Actively **Processing** (FFmpeg).
-- **` ⬇ `** (Yellow): Queued for download.
-- **` ⚙ `** (Yellow): Queued for processing.
-- **` ⬇ `** (Green): Downloaded & ready to process.
-- **` ✔ `** (Green): Fully processed and ready to play.
+- **`⠋⬇`** (Blue): Actively **Downloading**.
+- **`⠋⚙`** (Cyan): Actively **Processing** (FFmpeg).
+- **`⬇`** (Yellow): Queued for download.
+- **`⚙`** (Yellow): Queued for processing.
+- **`⬇`** (Green): Downloaded & ready to process.
+- **`✔`** (Green): Fully processed and ready to play.
 
 ## Configuration
 
