@@ -328,7 +328,6 @@ class QueueViewerModal(ModalScreen):
     def update_queue(self) -> None:
         """Polls the app state and updates the table."""
         table = self.query_one(DataTable)
-        table.clear()
         
         items = []
         # Active items
@@ -353,6 +352,12 @@ class QueueViewerModal(ModalScreen):
                 "action": f"Queued ({action})",
                 "progress": ""
             })
+
+        # Save current state
+        scroll_x, scroll_y = table.scroll_offset
+        cursor_cell = table.cursor_cell
+        
+        table.clear()
             
         if not items:
             table.add_row("-", "Queue is empty", "-", "-", "-")
@@ -365,6 +370,15 @@ class QueueViewerModal(ModalScreen):
                     item.get("title", ""),
                     item.get("asin", "")
                 )
+        
+        # Restore state
+        table.scroll_to(x=scroll_x, y=scroll_y, animate=False)
+        if cursor_cell:
+            try:
+                table.move_cursor(row=cursor_cell.row, column=cursor_cell.col)
+            except Exception:
+                # Row might have been removed
+                pass
 
     def action_close(self) -> None:
         self.dismiss()

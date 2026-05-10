@@ -700,7 +700,7 @@ class AudiobookManager(App):
         """Debounced search to improve performance."""
         # Using a timer to delay search until user stops typing
         if hasattr(self, "_search_timer"):
-            self._search_timer.cancel()
+            self._search_timer.stop()
 
         # 300ms delay is usually a good balance
         self._search_timer = self.set_timer(0.3, lambda: setattr(self, "search_query", event.value))
