@@ -220,6 +220,82 @@ async def test_verify_file_exists_async():
     assert result is True
     assert mock_path.exists.call_count == 2
 
+@pytest.mark.asyncio
+async def test_is_authenticated():
+    service = AudiobookService({})
+    
+    # Test authenticated (output contains *)
+    with patch.object(service, "_run_process") as mock_run:
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (b"  profile1\n* profile2\n", b"")
+        mock_run.return_value = mock_process
+        assert await service.is_authenticated() is True
+
+    # Test not authenticated (no *)
+    with patch.object(service, "_run_process") as mock_run:
+        mock_process = AsyncMock()
+        mock_process.communicate.return_value = (b"  profile1\n  profile2\n", b"")
+        mock_run.return_value = mock_process
+        assert await service.is_authenticated() is False
+
+@pytest.mark.asyncio
+async def test_download_success():
+    config = {"library_path": "/tmp/audiobooks"}
+    service = AudiobookService(config)
+    
+    with patch.object(service, "_run_process") as mock_run:
+        mock_process = AsyncMock()
+        # Mock read() to return bytes then empty bytes
+        mock_process.stdout.read.side_effect = [b"Downloading... Done!\n", b""]
+        mock_process.wait.return_value = 0
+        mock_run.return_value = mock_process
+        
+        log_msgs = []
+        result = await service.download("B01N26S3S6", lambda m: log_msgs.append(m))
+        
+        assert result == 0
+        assert "Downloading... Done!" in log_msgs
+
+@pytest.mark.asyncio
+async def test_download_failure():
+    service = AudiobookService({"library_path": "/tmp/audiobooks"})
+    
+    with patch.object(service, "_run_process") as mock_run:
+        mock_process = AsyncMock()
+        mock_process.stdout.read.return_value = b""
+        mock_process.wait.return_value = 1
+        mock_run.return_value = mock_process
+        
+        result = await service.download("B01N26S3S6", lambda x: None)
+        assert result == 1
+
+def test_cleanup_sources():
+    service = AudiobookService({"library_path": "/tmp/audiobooks"})
+    book = Audiobook(asin="B01N26S3S6", title="Oathbringer", author="Sanderson", parts=["PART1"])
+    
+    with patch("pathlib.Path.glob") as mock_glob, \
+         patch("pathlib.Path.unlink") as mock_unlink:
+        
+        # book.asin = B01N26S3S6
+        # book.parts = [PART1]
+        # search_asins = [B01N26S3S6, PART1]
+        # patterns = [B01N26S3S6*, PART1*, Oathbringer*]
+        # Each pattern is searched with 3 extensions (.aax, .json, .jpg)
+        # Total glob calls = 3 patterns * 3 extensions = 9 calls
+        
+        # Return a file for a few of them, empty list for others
+        mock_glob.side_effect = [
+            [Path("B01N26S3S6.aax")], [], [], # B01N26S3S6*
+            [Path("PART1.aax")], [], [],       # PART1*
+            [], [Path("Oathbringer.json")], []  # Oathbringer*
+        ]
+        
+        count = service.cleanup_sources(book, lambda x: None)
+        
+        assert count == 3
+        assert mock_unlink.call_count == 3
+        assert mock_glob.call_count == 9
+
 def test_play_audiobook_linux_call():
     # Regression test for 'str' object has no attribute 'fileno' on Linux
     config = {"library_path": "/tmp/audiobooks"}
