@@ -355,10 +355,10 @@ class QueueViewerModal(ModalScreen):
 
         # Save current state
         scroll_x, scroll_y = table.scroll_offset
-        cursor_cell = table.cursor_cell
-        
+        cursor_coord = table.cursor_coordinate
+
         table.clear()
-            
+
         if not items:
             table.add_row("-", "Queue is empty", "-", "-", "-")
         else:
@@ -370,16 +370,15 @@ class QueueViewerModal(ModalScreen):
                     item.get("title", ""),
                     item.get("asin", "")
                 )
-        
+
         # Restore state
         table.scroll_to(x=scroll_x, y=scroll_y, animate=False)
-        if cursor_cell:
+        if cursor_coord:
             try:
-                table.move_cursor(row=cursor_cell.row, column=cursor_cell.col)
+                table.move_cursor(row=cursor_coord.row, column=cursor_coord.column)
             except Exception:
                 # Row might have been removed
                 pass
-
     def action_close(self) -> None:
         self.dismiss()
 
