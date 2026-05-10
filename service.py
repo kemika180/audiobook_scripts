@@ -592,7 +592,7 @@ class AudiobookService:
             elif platform.system() == "Darwin": # macOS
                 subprocess.Popen(["open", str(path)])
             else: # Linux and others
-                subprocess.Popen(["xdg-open", str(path)], stderr=os.devnull, stdout=os.devnull)
+                subprocess.Popen(["xdg-open", str(path)], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
             return True, None
         except Exception as e:
             return False, str(e)

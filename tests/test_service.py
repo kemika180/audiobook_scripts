@@ -219,3 +219,24 @@ async def test_verify_file_exists_async():
     result = await service.verify_file_exists(mock_path, timeout=1.0)
     assert result is True
     assert mock_path.exists.call_count == 2
+
+def test_play_audiobook_linux_call():
+    # Regression test for 'str' object has no attribute 'fileno' on Linux
+    config = {"library_path": "/tmp/audiobooks"}
+    service = AudiobookService(config)
+    book = Audiobook(asin="B01N26S3S6", title="Oathbringer", author="Sanderson")
+    
+    with patch("platform.system", return_value="Linux"), \
+         patch("pathlib.Path.exists", return_value=True), \
+         patch("subprocess.Popen") as mock_popen:
+        
+        success, error = service.play_audiobook(book)
+        
+        assert success is True
+        assert error is None
+        
+        # Verify it was called with subprocess.DEVNULL (not os.devnull string)
+        import subprocess
+        _, kwargs = mock_popen.call_args
+        assert kwargs.get("stdout") == subprocess.DEVNULL
+        assert kwargs.get("stderr") == subprocess.DEVNULL
