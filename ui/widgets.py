@@ -1,4 +1,4 @@
-from textual.widgets import DataTable, Input, Log, RichLog
+from textual.widgets import DataTable, Input, RichLog
 from textual.binding import Binding
 from textual.geometry import Spacing
 

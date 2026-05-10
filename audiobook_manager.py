@@ -12,9 +12,8 @@ import json
 import shutil
 import re
 import asyncio
-import datetime
 import logging
-from typing import List, Dict, Iterable, Optional
+from typing import List, Dict, Iterable, Callable
 from pathlib import Path
 
 from platformdirs import user_config_dir
@@ -22,14 +21,13 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
-from textual.widgets import Header, Footer, DataTable, Input, Log
+from textual.widgets import Header, Footer, DataTable, Input
 from textual import work, on, events
 from textual.reactive import reactive
 from textual.screen import Screen
 
 from models import Audiobook
 from service import AudiobookService
-from exceptions import AudiobookError, DependencyError, AuthenticationError
 from ui.widgets import LibraryTable, SearchInput, StatusLog
 from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal, QueueViewerModal
 
@@ -163,44 +161,50 @@ class TaskQueueManager:
     """Manages the background task queue and book state tracking."""
 
     def __init__(self):
-        self.queue = asyncio.Queue()
-        self.pending_asins = set()
+        self.items: list[str] = []
+        self.pending_asins: set[str] = set()
+        self._event = asyncio.Event()
 
-    def put(self, asin: str):
+    def put(self, asin: str) -> bool:
+        """Adds an ASIN to the end of the queue if not already present."""
         if asin not in self.pending_asins:
             self.pending_asins.add(asin)
-            self.queue.put_nowait(asin)
+            self.items.append(asin)
+            self._event.set()
             return True
         return False
 
     async def get(self) -> str:
-        asin = await self.queue.get()
-        if asin in self.pending_asins:
-            self.pending_asins.remove(asin)
+        """Wait for and return the next ASIN in the queue."""
+        while not self.items:
+            self._event.clear()
+            await self._event.wait()
+        
+        asin = self.items.pop(0)
+        self.pending_asins.discard(asin)
         return asin
 
     def remove(self, asin: str) -> bool:
-        if asin not in self.pending_asins:
-            return False
-
-        self.pending_asins.remove(asin)
-        # Rebuild the queue without this ASIN
-        temp_items = []
-        while not self.queue.empty():
-            item = self.queue.get_nowait()
-            if item != asin:
-                temp_items.append(item)
-            self.queue.task_done()
-
-        for item in temp_items:
-            self.queue.put_nowait(item)
-        return True
-
-    def task_done(self):
-        self.queue.task_done()
+        """Removes an ASIN from the queue if present."""
+        if asin in self.pending_asins:
+            self.pending_asins.remove(asin)
+            try:
+                self.items.remove(asin)
+                if not self.items:
+                    self._event.clear()
+                return True
+            except ValueError:
+                pass
+        return False
 
     def is_empty(self) -> bool:
-        return self.queue.empty()
+        """Returns True if the queue is empty."""
+        return not self.items
+
+    @property
+    def pending_count(self) -> int:
+        """Returns the number of items in the queue."""
+        return len(self.items)
 
 class AudiobookManager(App):
     CSS = """
@@ -317,7 +321,7 @@ class AudiobookManager(App):
         if self.observer:
             self.observer.stop()
             self.observer.join()
-        
+
         # Shutdown service (terminate subprocesses)
         await self.service.shutdown()
 
@@ -350,7 +354,6 @@ class AudiobookManager(App):
             # Find the book
             book = self._library_lookup.get(asin)
             if not book:
-                self.task_queue.task_done()
                 continue
 
             book.queued = False
@@ -361,8 +364,6 @@ class AudiobookManager(App):
                 await self.download_book(asin)
             elif "⬇" in status: # Needs processing
                 await self.process_book(asin, title)
-
-            self.task_queue.task_done()
 
     def _get_status_display(self, book: Audiobook) -> str:
         """Generates an ultra-compact (3 char) status string using symbols."""
@@ -901,7 +902,6 @@ class AudiobookManager(App):
     async def download_book(self, asin: str) -> None:
         book = self._library_lookup.get(asin)
         if book:
-            book.working = True
             book.working_mode = "downloading"
             self.update_row_status(asin)
 
@@ -937,7 +937,6 @@ class AudiobookManager(App):
                 log_handler(f"\n[bold red]Failed with code {res}[/]")
         finally:
             if book:
-                book.working = False
                 book.working_mode = ""
             self.active_logs.pop(asin, None)
             self.update_row_status(asin)
@@ -949,7 +948,6 @@ class AudiobookManager(App):
             # Create a temporary one if not found (shouldn't happen)
             book = Audiobook(asin=asin, author="Unknown", title=title)
 
-        book.working = True
         book.working_mode = "processing"
         self.update_row_status(asin)
 
@@ -987,7 +985,6 @@ class AudiobookManager(App):
             else:
                 logger.error(f"Processing failed for {title}")
         finally:
-            book.working = False
             book.working_mode = ""
             self.active_logs.pop(asin, None)
             self.update_row_status(asin)

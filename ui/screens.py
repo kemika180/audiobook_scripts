@@ -1,7 +1,7 @@
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.geometry import Spacing
-from textual.widgets import Header, Footer, DataTable, Input, Button, Label, Log, RichLog, Checkbox
+from textual.widgets import Header, Footer, DataTable, Input, Button, Label, RichLog, Checkbox
 from textual.containers import Vertical, Horizontal
 from textual.screen import ModalScreen
 from textual import on

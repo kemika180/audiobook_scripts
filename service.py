@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from models import Audiobook
 from utils import sanitize_filename, convert_chapters_json_to_ffmetadata
-from exceptions import AudibleAPIError, ConversionError, AuthenticationError, DownloadError
+from exceptions import AudibleAPIError, AuthenticationError
 
 class AudiobookService:
     def __init__(self, config: Dict):
@@ -18,12 +18,19 @@ class AudiobookService:
 
     async def _run_process(self, *args, **kwargs) -> asyncio.subprocess.Process:
         """Helper to run a subprocess and track it."""
+        # Clean up any already finished processes to avoid memory leaks
+        self._active_processes = [p for p in self._active_processes if p.returncode is None]
+        
         process = await asyncio.create_subprocess_exec(*args, **kwargs)
         self._active_processes.append(process)
         return process
 
     async def shutdown(self):
-        """Terminates all active subprocesses."""
+        """Terminates all active subprocesses with a timeout and kill fallback."""
+        if not self._active_processes:
+            return
+
+        # 1. Try graceful termination
         for process in self._active_processes:
             if process.returncode is None:
                 try:
@@ -31,9 +38,24 @@ class AudiobookService:
                 except Exception:
                     pass
         
-        # Wait a bit for them to finish
-        if self._active_processes:
+        # 2. Wait for a short period
+        wait_tasks = [asyncio.create_task(p.wait()) for p in self._active_processes if p.returncode is None]
+        pending = set()
+        if wait_tasks:
+            _, pending = await asyncio.wait(wait_tasks, timeout=3.0)
+        
+        # 3. Force kill any remaining processes
+        if pending:
+            for process in self._active_processes:
+                if process.returncode is None:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+            
+            # Final wait for killed processes
             await asyncio.gather(*(p.wait() for p in self._active_processes if p.returncode is None), return_exceptions=True)
+            
         self._active_processes.clear()
 
     @property
@@ -73,35 +95,35 @@ class AudiobookService:
         file_set = {f.name for f in lib.iterdir()}
         status_map = {}
         
-        # Pre-calculate which ASINs/Titles have AAX or M4B
-        has_m4b = set()
-        has_aax = set()
+        # Pre-calculate base names for fast lookup
+        # Map base name (ASIN or safe title) to the most advanced status found
+        # priority: m4b > aax
+        base_status = {}
         
         for f in file_set:
             if f.endswith(".m4b"):
-                has_m4b.add(f[:-4])
+                name = f[:-4]
+                base_status[name] = "✔"
             elif f.endswith(".aax"):
-                # Store the prefix before the first dot/dash if possible, 
-                # or just the whole name for prefix matching
-                has_aax.add(f)
+                # Handle ASIN_ascii.aax, ASIN.part1.aax, etc.
+                name = f.split(".")[0]
+                if base_status.get(name) != "✔":
+                    base_status[name] = "⬇"
 
         for book in books:
             asin = book.asin
             safe_title = book.safe_title
             
-            # Check M4B
-            if safe_title in has_m4b or asin in has_m4b:
+            # Check for M4B first
+            if base_status.get(asin) == "✔" or base_status.get(safe_title) == "✔":
                 status_map[asin] = "[bold green]✔[/]"
                 continue
-                
-            # Check AAX
-            found_aax = False
-            search_prefixes = [asin, safe_title] + (book.parts or [])
             
-            # This is still a bit slow if has_aax is large
-            # We can optimize by checking if any prefix matches any file in has_aax
-            for f in has_aax:
-                if any(f.startswith(p) for p in search_prefixes):
+            # Check for AAX
+            found_aax = False
+            search_keys = [asin, safe_title] + (book.parts or [])
+            for key in search_keys:
+                if base_status.get(key) == "⬇":
                     found_aax = True
                     break
             
@@ -117,33 +139,23 @@ class AudiobookService:
         safe_title = sanitize_filename(title)
         lib = self.library_path
 
-        if file_set is not None:
-            # Check for M4B
-            if f"{safe_title}.m4b" in file_set or f"{asin}.m4b" in file_set:
-                return "[bold green]✔[/]"
-            
-            # Check for AAX (approximate glob with startswith)
-            # For multi-part, check if ANY part exists as a starting point
-            search_asins = [asin] + (parts or [])
-            for f in file_set:
-                for s_asin in search_asins:
-                    if f.startswith(s_asin) and f.endswith(".aax"):
-                        return "[bold yellow]⬇[/]"
-                if f.startswith(safe_title) and f.endswith(".aax"):
-                    return "[bold yellow]⬇[/]"
-            return ""
+        if file_set is None:
+            if not lib.exists():
+                return ""
+            file_set = {f.name for f in lib.iterdir()}
 
-        # Fallback for M4B (sanitized title or ASIN)
-        if (lib / f"{safe_title}.m4b").exists() or (lib / f"{asin}.m4b").exists():
+        # Check for M4B
+        if f"{safe_title}.m4b" in file_set or f"{asin}.m4b" in file_set:
             return "[bold green]✔[/]"
-
-        # Fallback for AAX
-        search_asins = [asin] + (parts or [])
-        aax_patterns = [f"{s_asin}*.aax" for s_asin in search_asins] + [f"{safe_title}*.aax"]
-        for pattern in aax_patterns:
-            if any(lib.glob(pattern)):
-                return "[bold yellow]⬇[/]"
-
+        
+        # Check for AAX
+        search_keys = [asin, safe_title] + (parts or [])
+        for f in file_set:
+            if f.endswith(".aax"):
+                base = f.split(".")[0]
+                if base in search_keys:
+                    return "[bold yellow]⬇[/]"
+        
         return ""
 
     async def verify_file_exists(self, path: Path, timeout: float = 2.0) -> bool:

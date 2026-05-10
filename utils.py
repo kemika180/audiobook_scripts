@@ -36,7 +36,7 @@ def convert_chapters_json_to_ffmetadata(json_data: dict, tags: dict = None) -> l
         return text.translate(
             str.maketrans({
                 "\\": r"\\",
-                "\n": r"\\n",
+                "\n": r"\n",
                 "#":  r"\#",
                 ";":  r"\;",
                 "=":  r"\="

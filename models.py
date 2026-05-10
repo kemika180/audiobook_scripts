@@ -15,7 +15,6 @@ class Audiobook:
     series_sequence: str = ""
     status: str = ""
     working_mode: str = "" # "", "downloading", "processing", "queued"
-    working: bool = False
     queued: bool = False
     spinner_frame: int = 0
     parts: list[str] = None # List of ASINs for multi-part books
