@@ -1,16 +1,40 @@
-import subprocess
 import asyncio
 import json
 import re
 import tempfile
+import platform
+import os
+import subprocess
 from pathlib import Path
 from typing import List, Dict, Optional, Callable
 from models import Audiobook
 from utils import sanitize_filename, convert_chapters_json_to_ffmetadata
+from exceptions import AudibleAPIError, ConversionError, AuthenticationError, DownloadError
 
 class AudiobookService:
     def __init__(self, config: Dict):
         self.config = config
+        self._active_processes: List[asyncio.subprocess.Process] = []
+
+    async def _run_process(self, *args, **kwargs) -> asyncio.subprocess.Process:
+        """Helper to run a subprocess and track it."""
+        process = await asyncio.create_subprocess_exec(*args, **kwargs)
+        self._active_processes.append(process)
+        return process
+
+    async def shutdown(self):
+        """Terminates all active subprocesses."""
+        for process in self._active_processes:
+            if process.returncode is None:
+                try:
+                    process.terminate()
+                except Exception:
+                    pass
+        
+        # Wait a bit for them to finish
+        if self._active_processes:
+            await asyncio.gather(*(p.wait() for p in self._active_processes if p.returncode is None), return_exceptions=True)
+        self._active_processes.clear()
 
     @property
     def library_path(self) -> Path:
@@ -28,7 +52,7 @@ class AudiobookService:
     async def is_authenticated(self) -> bool:
         """Checks if audible-cli has an active/configured profile."""
         try:
-            process = await asyncio.create_subprocess_exec(
+            process = await self._run_process(
                 "audible", "manage", "profile", "list",
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -40,7 +64,55 @@ class AudiobookService:
         except Exception:
             return False
 
-    def get_status(self, asin: str, title: str, file_set: Optional[set] = None) -> str:
+    def get_status_map(self, books: List[Audiobook]) -> Dict[str, str]:
+        """Returns a map of ASIN to status string for a list of books efficiently."""
+        lib = self.library_path
+        if not lib.exists():
+            return {}
+
+        file_set = {f.name for f in lib.iterdir()}
+        status_map = {}
+        
+        # Pre-calculate which ASINs/Titles have AAX or M4B
+        has_m4b = set()
+        has_aax = set()
+        
+        for f in file_set:
+            if f.endswith(".m4b"):
+                has_m4b.add(f[:-4])
+            elif f.endswith(".aax"):
+                # Store the prefix before the first dot/dash if possible, 
+                # or just the whole name for prefix matching
+                has_aax.add(f)
+
+        for book in books:
+            asin = book.asin
+            safe_title = book.safe_title
+            
+            # Check M4B
+            if safe_title in has_m4b or asin in has_m4b:
+                status_map[asin] = "[bold green]✔[/]"
+                continue
+                
+            # Check AAX
+            found_aax = False
+            search_prefixes = [asin, safe_title] + (book.parts or [])
+            
+            # This is still a bit slow if has_aax is large
+            # We can optimize by checking if any prefix matches any file in has_aax
+            for f in has_aax:
+                if any(f.startswith(p) for p in search_prefixes):
+                    found_aax = True
+                    break
+            
+            if found_aax:
+                status_map[asin] = "[bold yellow]⬇[/]"
+            else:
+                status_map[asin] = ""
+                
+        return status_map
+
+    def get_status(self, asin: str, title: str, file_set: Optional[set] = None, parts: List[str] = None) -> str:
         """Checks the filesystem for the status of a book."""
         safe_title = sanitize_filename(title)
         lib = self.library_path
@@ -51,9 +123,12 @@ class AudiobookService:
                 return "[bold green]✔[/]"
             
             # Check for AAX (approximate glob with startswith)
+            # For multi-part, check if ANY part exists as a starting point
+            search_asins = [asin] + (parts or [])
             for f in file_set:
-                if f.startswith(asin) and f.endswith(".aax"):
-                    return "[bold yellow]⬇[/]"
+                for s_asin in search_asins:
+                    if f.startswith(s_asin) and f.endswith(".aax"):
+                        return "[bold yellow]⬇[/]"
                 if f.startswith(safe_title) and f.endswith(".aax"):
                     return "[bold yellow]⬇[/]"
             return ""
@@ -63,7 +138,8 @@ class AudiobookService:
             return "[bold green]✔[/]"
 
         # Fallback for AAX
-        aax_patterns = [f"{asin}*.aax", f"{safe_title}*.aax"]
+        search_asins = [asin] + (parts or [])
+        aax_patterns = [f"{s_asin}*.aax" for s_asin in search_asins] + [f"{safe_title}*.aax"]
         for pattern in aax_patterns:
             if any(lib.glob(pattern)):
                 return "[bold yellow]⬇[/]"
@@ -87,9 +163,9 @@ class AudiobookService:
             cmd = [
                 "audible", "api", "/1.0/library",
                 "-p", "num_results=1000",
-                "-p", "response_groups=product_details,product_desc,contributors,series"
+                "-p", "response_groups=product_details,product_desc,contributors,series,relationships"
             ]
-            process = await asyncio.create_subprocess_exec(
+            process = await self._run_process(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
@@ -97,7 +173,7 @@ class AudiobookService:
             stdout, stderr = await process.communicate()
             
             if process.returncode != 0:
-                raise RuntimeError(f"Audible API failed: {stderr.decode().strip()}")
+                raise AudibleAPIError(f"Audible API failed: {stderr.decode().strip()}")
 
             data = json.loads(stdout.decode())
             items = data.get("items", [])
@@ -140,10 +216,27 @@ class AudiobookService:
                 series_title = ""
                 series_sequence = ""
                 if series_list:
-                    series_title = series_list[0].get("title", "")
-                    series_sequence = series_list[0].get("sequence", "")
+                    # If multiple series, try to find one with a sequence number
+                    # as it's usually the more specific/primary one
+                    primary_series = series_list[0]
+                    for s in series_list:
+                        if s.get("sequence"):
+                            primary_series = s
+                            break
+                    series_title = primary_series.get("title", "")
+                    series_sequence = primary_series.get("sequence", "")
 
-                status = self.get_status(asin, title, file_set=file_set)
+                # Extract parts (relationships)
+                parts = []
+                relationships = item.get("relationships") or []
+                # Sort components by 'sort' field if available to ensure correct order
+                components = [r for r in relationships if r.get("relationship_type") == "component"]
+                if components:
+                    # Sort by the 'sort' key, which is usually a string representation of the part number
+                    components.sort(key=lambda x: int(x.get("sort", "0")) if x.get("sort", "").isdigit() else 0)
+                    parts = [c.get("asin") for c in components if c.get("asin")]
+
+                status = self.get_status(asin, title, file_set=file_set, parts=parts)
                 
                 books.append(Audiobook(
                     asin=asin,
@@ -154,19 +247,20 @@ class AudiobookService:
                     duration_ms=duration_ms,
                     series_title=series_title,
                     series_sequence=series_sequence,
-                    status=status
+                    status=status,
+                    parts=parts
                 ))
                     
             return books
         except Exception as e:
-            if isinstance(e, RuntimeError):
+            if isinstance(e, (AudibleAPIError, AuthenticationError)):
                 raise
-            raise RuntimeError(f"Unexpected error fetching library: {e}") from e
+            raise AudibleAPIError(f"Unexpected error fetching library: {e}") from e
 
     async def download(self, asin: str, log_callback: Callable[[str], None]) -> int:
         """Runs the audible download command asynchronously."""
         cmd = ["audible", "download", "-a", asin, "--aax", "--cover", "--chapter", "--filename-mode", "asin_ascii", "-y"]
-        process = await asyncio.create_subprocess_exec(
+        process = await self._run_process(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
@@ -194,6 +288,68 @@ class AudiobookService:
         
         return await process.wait()
 
+    async def merge_aax_parts(self, aax_files: List[Path], activation_bytes: str, log_callback: Callable[[str], None]) -> Optional[Path]:
+        """Decrypts and merges multiple AAX parts into a single M4A file."""
+        temp_m4as = []
+        merged_m4a = None
+        concat_path = None
+        
+        try:
+            for i, aax_path in enumerate(aax_files):
+                # Use the same directory as the first AAX for temp files to ensure enough space
+                temp_m4a = aax_path.with_suffix(f".part{i}.tmp.m4a")
+                temp_m4as.append(temp_m4a)
+                
+                log_callback(f"Decrypting part {i+1}/{len(aax_files)}: {aax_path.name}...")
+                cmd = ["ffmpeg", "-y", "-activation_bytes", activation_bytes, "-i", str(aax_path), "-c:a", "copy", "-vn", str(temp_m4a)]
+                
+                process = await self._run_process(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT
+                )
+                await process.wait()
+                if process.returncode != 0:
+                    log_callback(f"[bold red]Failed to decrypt part {i+1}[/]")
+                    return None
+
+            # Create concat file for FFmpeg
+            concat_path = aax_files[0].with_suffix(".concat.tmp.txt")
+            with open(concat_path, "w", encoding="utf-8") as f:
+                for m4a in temp_m4as:
+                    # FFmpeg concat file expects escaped paths or relative paths
+                    f.write(f"file '{m4a.name}'\n")
+
+            merged_m4a = aax_files[0].with_suffix(".merged.tmp.m4a")
+            log_callback("Merging all parts...")
+            cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_path), "-c", "copy", str(merged_m4a)]
+            
+            process = await self._run_process(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.STDOUT
+            )
+            await process.wait()
+            
+            if process.returncode != 0:
+                log_callback("[bold red]Failed to merge parts[/]")
+                return None
+                
+            return merged_m4a
+
+        except Exception as e:
+            log_callback(f"[bold red]Merge error: {e}[/]")
+            return None
+        finally:
+            # Cleanup intermediate temp files
+            for m4a in temp_m4as:
+                if m4a.exists():
+                    try: m4a.unlink()
+                    except: pass
+            if concat_path and concat_path.exists():
+                try: concat_path.unlink()
+                except: pass
+
     async def process_m4b(self, book: Audiobook, log_callback: Callable[[str], None]) -> bool:
         """Converts AAX to M4B with chapters and cover art asynchronously."""
         if not self.activation_bytes:
@@ -215,15 +371,50 @@ class AudiobookService:
             return False
 
         # 2. Find AAX
-        aax_path = None
-        for pattern in [f"{book.asin}*.aax", f"{safe_title}*.aax"]:
-            matches = list(lib.glob(pattern))
-            if matches:
-                aax_path = matches[0]
-                break
-        if not aax_path:
-            log_callback("[bold red]AAX file not found.[/]")
+        aax_files = []
+        search_asins = [book.asin] + (book.parts or [])
+        for s_asin in search_asins:
+            matches = list(lib.glob(f"{s_asin}*.aax"))
+            for m in matches:
+                if m not in aax_files:
+                    aax_files.append(m)
+        
+        # Also try safe_title if no ASIN matches or to find more parts
+        title_matches = list(lib.glob(f"*{safe_title}*.aax"))
+        for tm in title_matches:
+            # For title matches, be a bit more selective to avoid matching other books
+            # If it contains "Part", it's likely a part of this book if the title matches
+            if tm not in aax_files:
+                if any(s_asin in tm.name for s_asin in search_asins) or "Part" in tm.name:
+                    aax_files.append(tm)
+        
+        if not aax_files:
+            log_callback("[bold red]AAX file(s) not found.[/]")
             return False
+
+        # Sort files to ensure parts are in order
+        # We sort by filename, but try to handle numeric part numbers
+        def sort_key(path):
+            name = path.name
+            # Look for "Part X" or "_X"
+            part_match = re.search(r"[Pp]art[ _]?(\d+)", name)
+            if part_match:
+                return int(part_match.group(1))
+            # Fallback to string sort
+            return name
+
+        aax_files.sort(key=sort_key)
+
+        aax_input_path = None
+        temp_merged_path = None
+        
+        if len(aax_files) > 1:
+            temp_merged_path = await self.merge_aax_parts(aax_files, self.activation_bytes, log_callback)
+            if not temp_merged_path:
+                return False
+            aax_input_path = temp_merged_path
+        else:
+            aax_input_path = aax_files[0]
 
         # 3. Find Cover
         cover_path = None
@@ -278,9 +469,13 @@ class AudiobookService:
         try:
             # 5. Build FFmpeg command
             output_path = lib / f"{book.asin}.m4b"
-            # -activation_bytes is an input option for aax, placed before -i
-            # We remove forced -f aax as auto-detection is usually more robust
-            cmd = ["ffmpeg", "-y", "-activation_bytes", self.activation_bytes, "-i", str(aax_path), "-f", "ffmetadata", "-i", str(meta_path)]
+            
+            # If we merged parts, the input is already decrypted M4A
+            # Otherwise, it's a single AAX that needs activation_bytes
+            if temp_merged_path:
+                cmd = ["ffmpeg", "-y", "-i", str(aax_input_path), "-f", "ffmetadata", "-i", str(meta_path)]
+            else:
+                cmd = ["ffmpeg", "-y", "-activation_bytes", self.activation_bytes, "-i", str(aax_input_path), "-f", "ffmetadata", "-i", str(meta_path)]
             
             if cover_path:
                 cmd.extend(["-i", str(cover_path)])
@@ -307,7 +502,7 @@ class AudiobookService:
             cmd.append(str(output_path))
 
             # 6. Run FFmpeg
-            process = await asyncio.create_subprocess_exec(
+            process = await self._run_process(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT
@@ -345,12 +540,18 @@ class AudiobookService:
         finally:
             if meta_path and meta_path.exists():
                 meta_path.unlink()
+            if temp_merged_path and temp_merged_path.exists():
+                try: temp_merged_path.unlink()
+                except: pass
 
     def cleanup_sources(self, book: Audiobook, log_callback):
         """Deletes original files after conversion."""
         lib = self.library_path
         count = 0
-        for pattern in [f"{book.asin}*", f"{book.safe_title}*"]:
+        search_asins = [book.asin] + (book.parts or [])
+        patterns = [f"{s_asin}*" for s_asin in search_asins] + [f"{book.safe_title}*"]
+        
+        for pattern in patterns:
             for ext in [".aax", ".json", ".jpg"]:
                 for match in lib.glob(f"{pattern}{ext}"):
                     try:
@@ -363,7 +564,6 @@ class AudiobookService:
 
     def play_audiobook(self, book: Audiobook):
         """Opens the finalized M4B file in the system default player."""
-        import os
         safe_title = book.safe_title
         path = self.library_path / f"{safe_title}.m4b"
         
@@ -375,13 +575,12 @@ class AudiobookService:
             return False, "M4B file not found."
 
         try:
-            import platform
             if platform.system() == "Windows":
                 os.startfile(str(path))
             elif platform.system() == "Darwin": # macOS
                 subprocess.Popen(["open", str(path)])
             else: # Linux and others
-                subprocess.Popen(["xdg-open", str(path)], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+                subprocess.Popen(["xdg-open", str(path)], stderr=os.devnull, stdout=os.devnull)
             return True, None
         except Exception as e:
             return False, str(e)

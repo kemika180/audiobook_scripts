@@ -4,6 +4,7 @@
 #     "textual",
 #     "platformdirs",
 #     "pytest",
+#     "watchdog",
 # ]
 # ///
 
@@ -11,10 +12,14 @@ import json
 import shutil
 import re
 import asyncio
-from typing import List, Dict, Iterable
+import datetime
+import logging
+from typing import List, Dict, Iterable, Optional
 from pathlib import Path
 
 from platformdirs import user_config_dir
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
 from textual.widgets import Header, Footer, DataTable, Input, Log
@@ -24,10 +29,11 @@ from textual.screen import Screen
 
 from models import Audiobook
 from service import AudiobookService
+from exceptions import AudiobookError, DependencyError, AuthenticationError
 from ui.widgets import LibraryTable, SearchInput, StatusLog
 from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal, QueueViewerModal
 
-# Configuration
+# Constants
 APP_NAME = "audiobook-manager"
 CONFIG_DIR = Path(user_config_dir(APP_NAME))
 CONFIG_FILE = CONFIG_DIR / "config.json"
@@ -36,27 +42,55 @@ OLD_CONFIG_FILE = Path(__file__).parent / "audiobook_config.json"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-def load_config() -> Dict:
-    # Migration: Check if old config exists and move it
-    if OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
-        try:
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(OLD_CONFIG_FILE), str(CONFIG_FILE))
-        except Exception:
-            pass
+logger = logging.getLogger("audiobook-manager")
+logger.setLevel(logging.INFO)
 
-    if CONFIG_FILE.exists():
+class TuiLogHandler(logging.Handler):
+    """Custom logging handler that writes to the Textual StatusLog widget."""
+    def __init__(self, log_widget):
+        super().__init__()
+        self.log_widget = log_widget
+
+    def emit(self, record):
         try:
-            with open(CONFIG_FILE, "r") as f:
-                data = json.load(f)
-                # Migration for secondary sorting
-                if "sort_column" in data and "sort_order" not in data:
-                    col = data["sort_column"]
-                    data["sort_order"] = [col] + [c for c in ["title", "author", "series_title", "asin"] if c != col]
-                return data
+            msg = self.format(record)
+            # Add Rich coloring based on level
+            if record.levelno >= logging.ERROR:
+                msg = f"[bold red]{msg}[/]"
+            elif record.levelno >= logging.WARNING:
+                msg = f"[bold yellow]{msg}[/]"
+            elif record.levelno >= logging.INFO:
+                if "successfully" in msg.lower() or "complete" in msg.lower():
+                    msg = f"[bold green]{msg}[/]"
+            
+            self.log_widget.write(msg)
         except Exception:
-            pass
-    return {
+            self.handleError(record)
+
+class LibraryWatcher(FileSystemEventHandler):
+    """Watches the library directory for changes and triggers UI updates."""
+    def __init__(self, callback: Callable[[], None]):
+        self.callback = callback
+        self._loop = asyncio.get_event_loop()
+
+    def on_any_event(self, event):
+        # We only care about file creation, deletion, or renaming
+        if event.is_directory:
+            return
+        
+        # Debounce slightly to avoid multiple refreshes for a single multi-file operation
+        if hasattr(self, "_timer"):
+            self._loop.call_soon_threadsafe(self._timer.cancel)
+        
+        self._timer = self._loop.call_later(0.5, self._trigger_callback)
+
+    def _trigger_callback(self):
+        self.callback()
+
+class ConfigManager:
+    """Manages application configuration loading, saving, and migrations."""
+
+    DEFAULT_CONFIG = {
         "theme": "tokyo-night", 
         "log_visible": True,
         "activation_bytes": "",
@@ -68,14 +102,105 @@ def load_config() -> Dict:
         "auto_process": False
     }
 
-def save_config(config: Dict):
-    try:
-        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        with open(CONFIG_FILE, "w") as f:
-            json.dump(config, f, indent=4)
+    def __init__(self):
+        self._config = self.load_config()
+
+    def load_config(self) -> Dict:
+        # Migration: Check if old config exists and move it
+        if OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
+            try:
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(OLD_CONFIG_FILE), str(CONFIG_FILE))
+            except Exception:
+                pass
+
+        if CONFIG_FILE.exists():
+            try:
+                with open(CONFIG_FILE, "r") as f:
+                    data = json.load(f)
+                    # Migration for secondary sorting
+                    if "sort_column" in data and "sort_order" not in data:
+                        col = data["sort_column"]
+                        data["sort_order"] = [col] + [c for c in ["title", "author", "series_title", "asin"] if c != col]
+
+                    # Ensure all default keys exist
+                    for key, val in self.DEFAULT_CONFIG.items():
+                        if key not in data:
+                            data[key] = val
+                    return data
+            except Exception:
+                pass
+        return self.DEFAULT_CONFIG.copy()
+
+    def save(self):
+        try:
+            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(self._config, f, indent=4)
+            return True
+        except Exception as e:
+            return str(e)
+
+    def get(self, key, default=None):
+        return self._config.get(key, default)
+
+    def update(self, mapping):
+        self._config.update(mapping)
+        self.save()
+
+    def set(self, key, value):
+        self._config[key] = value
+        self.save()
+
+    def __getitem__(self, key):
+        return self._config[key]
+
+    def __setitem__(self, key, value):
+        self._config[key] = value
+        self.save()
+
+class TaskQueueManager:
+    """Manages the background task queue and book state tracking."""
+
+    def __init__(self):
+        self.queue = asyncio.Queue()
+        self.pending_asins = set()
+
+    def put(self, asin: str):
+        if asin not in self.pending_asins:
+            self.pending_asins.add(asin)
+            self.queue.put_nowait(asin)
+            return True
+        return False
+
+    async def get(self) -> str:
+        asin = await self.queue.get()
+        if asin in self.pending_asins:
+            self.pending_asins.remove(asin)
+        return asin
+
+    def remove(self, asin: str) -> bool:
+        if asin not in self.pending_asins:
+            return False
+
+        self.pending_asins.remove(asin)
+        # Rebuild the queue without this ASIN
+        temp_items = []
+        while not self.queue.empty():
+            item = self.queue.get_nowait()
+            if item != asin:
+                temp_items.append(item)
+            self.queue.task_done()
+
+        for item in temp_items:
+            self.queue.put_nowait(item)
         return True
-    except Exception as e:
-        return str(e)
+
+    def task_done(self):
+        self.queue.task_done()
+
+    def is_empty(self) -> bool:
+        return self.queue.empty()
 
 class AudiobookManager(App):
     CSS = """
@@ -104,29 +229,40 @@ class AudiobookManager(App):
     ]
 
     search_query = reactive("")
-
     def __init__(self):
         super().__init__()
-        self.config = load_config()
+        self.config = ConfigManager()
         self.service = AudiobookService(self.config)
         self.full_library: List[Audiobook] = []
+        self._library_lookup: Dict[str, Audiobook] = {}
         self.active_logs: Dict[str, Dict] = {}
-        self.task_queue = asyncio.Queue()
+        self.task_queue = TaskQueueManager()
         self.col_keys = {}
         self.sort_order = self.config.get("sort_order", ["title", "author", "asin"])
         self.sort_reverse = self.config.get("sort_reverse", False)
+        
+        # Filesystem watcher
+        self.observer = None
 
+    def setup_logging(self) -> None:
+        """Sets up the standard logging system."""
+        # File handler (Plain text)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(LOG_FILE)
+        file_handler.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)s: %(message)s', '%Y-%m-%d %H:%M:%S'))
+        logger.addHandler(file_handler)
+
+        # TUI handler (Rich formatted)
+        tui_handler = TuiLogHandler(self.query_one("#log"))
+        tui_handler.setFormatter(logging.Formatter('%(message)s'))
+        logger.addHandler(tui_handler)
 
     def watch_theme(self, theme: str) -> None:
         """Saves the theme to config whenever it changes."""
         if hasattr(self, "config"):
             if self.config.get("theme") != theme:
-                self.config["theme"] = theme
-                res = save_config(self.config)
-                if res is not True:
-                    self.log_message(f"[bold red]Failed to save theme[/]: {res}")
-                else:
-                    self.log_message(f"Theme saved: {theme}")
+                self.config.set("theme", theme)
+                logger.info(f"Theme saved: {theme}")
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -136,52 +272,63 @@ class AudiobookManager(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.setup_logging()
+        
         # Check dependencies
         missing = []
         if not shutil.which("ffmpeg"):
             missing.append("ffmpeg")
         if not shutil.which("audible"):
             missing.append("audible-cli")
-        
+
         if missing:
-            self.notify(f"Missing dependencies: {', '.join(missing)}. Some features will not work.", severity="error")
-            self.log_message(f"[bold red]ERROR: Missing dependencies: {', '.join(missing)}[/]")
-            self.log_message("Please install them and restart the application.")
+            msg = f"Missing dependencies: {', '.join(missing)}. Some features will not work."
+            self.notify(msg, severity="error")
+            logger.error(msg)
+            logger.info("Please install them and restart the application.")
 
         # Check authentication
         self.check_authentication()
 
         # Apply the saved theme from config
         saved_theme = self.config.get("theme", "tokyo-night")
-        if saved_theme == "dark":
-            saved_theme = "tokyo-night"
-
         self.theme = saved_theme
 
         # Restore log visibility
         log = self.query_one("#log")
         log.display = self.config.get("log_visible", True)
 
-        # If config didn't exist, create it now
-        if not CONFIG_FILE.exists():
-            save_config(self.config)
-
         self.rebuild_table_columns()
-
         self.action_refresh_library()
-        
+
         # Start background workers
         self.set_interval(0.1, self.animate_spinners)
         self.process_queue()
+
+        # Start filesystem watcher
+        lib_path = self.service.library_path
+        if lib_path.exists():
+            self.observer = Observer()
+            self.observer.schedule(LibraryWatcher(self.refresh_all_statuses), str(lib_path), recursive=False)
+            self.observer.start()
+
+    async def on_unmount(self) -> None:
+        """Clean up background resources."""
+        if self.observer:
+            self.observer.stop()
+            self.observer.join()
+        
+        # Shutdown service (terminate subprocesses)
+        await self.service.shutdown()
 
     def rebuild_table_columns(self) -> None:
         """Rebuilds the DataTable columns based on config."""
         table = self.query_one("#library_table", LibraryTable)
         table.clear(columns=True)
         self.col_keys = {}
-        
+
         visible = self.config.get("visible_columns", ["Status", "ASIN", "Author", "Title", "Series"])
-        
+
         for col in visible:
             label = "" if col == "Status" else col
             # Ultra-compact status column (3 chars)
@@ -199,13 +346,13 @@ class AudiobookManager(App):
         """Background worker that processes tasks from the queue sequentially."""
         while True:
             asin = await self.task_queue.get()
-            
+
             # Find the book
-            book = next((b for b in self.full_library if b.asin == asin), None)
+            book = self._library_lookup.get(asin)
             if not book:
                 self.task_queue.task_done()
                 continue
-            
+
             book.queued = False
             title = book.title
             status = self.service.get_status(asin, title)
@@ -214,13 +361,13 @@ class AudiobookManager(App):
                 await self.download_book(asin)
             elif "⬇" in status: # Needs processing
                 await self.process_book(asin, title)
-            
+
             self.task_queue.task_done()
 
     def _get_status_display(self, book: Audiobook) -> str:
         """Generates an ultra-compact (3 char) status string using symbols."""
         frame = SPINNER_FRAMES[book.spinner_frame]
-        
+
         if book.working_mode == "downloading":
             return f" [blue]{frame}[/][bold blue]⬇[/]"
         elif book.working_mode == "processing":
@@ -231,7 +378,7 @@ class AudiobookManager(App):
             return "  [bold yellow]⚙[/] "
         elif book.working_mode == "queued": # Fallback
             return "  ⏳"
-        
+
         # Static statuses
         if "✔" in book.status:
             return " [bold green]✔[/] "
@@ -239,34 +386,36 @@ class AudiobookManager(App):
             return "  [bold green]⬇[/] "
         elif "⚙" in book.status:
             return "  [bold yellow]⚙[/] "
-            
+
         return "   "
 
     def animate_spinners(self) -> None:
         """Updates the spinner frame for all working books."""
-        updated = False
+        if not self.active_logs:
+            return
+
         table = self.query_one("#library_table", LibraryTable)
         status_key = self.col_keys.get("Status")
         if not status_key:
             return
 
-        asin_key = self.col_keys.get("ASIN")
-        if not asin_key:
-            return
-
-        asin_idx = list(self.col_keys.values()).index(asin_key)
-        
-        for row_key in table.rows:
-            row_data = table.get_row(row_key)
-            asin = row_data[asin_idx]
-            
-            # Find the book in our full library
-            book = next((b for b in self.full_library if b.asin == asin), None)
+        updated = False
+        # Use the cached lookup instead of recreating it every 0.1s
+        for asin in self.active_logs.keys():
+            book = self._library_lookup.get(asin)
             if book and book.working_mode in ["downloading", "processing"]:
                 book.spinner_frame = (book.spinner_frame + 1) % len(SPINNER_FRAMES)
-                table.update_cell(row_key, status_key, self._get_status_display(book))
-                updated = True
-        
+
+                # Find the row for this ASIN
+                try:
+                    # Textual DataTable supports getting row by key if we set it
+                    # In apply_filter we set key=book.asin
+                    table.update_cell(asin, status_key, self._get_status_display(book))
+                    updated = True
+                except Exception:
+                    # Row might not be in the current filtered view
+                    pass
+
         if updated:
             table.refresh()
 
@@ -282,14 +431,14 @@ class AudiobookManager(App):
             "Series": "series_title",
             "Year": "year"
         }
-        
+
         # Find which column was clicked
         target_label = None
         for label, key in self.col_keys.items():
             if key == event.column_key:
                 target_label = label
                 break
-        
+
         target_col = column_map.get(target_label)
         if not target_col:
             return
@@ -305,13 +454,13 @@ class AudiobookManager(App):
             self.sort_reverse = False
 
         # Save to config
-        self.config["sort_order"] = self.sort_order
-        self.config["sort_reverse"] = self.sort_reverse
-        save_config(self.config)
+        self.config.set("sort_order", self.sort_order)
+        self.config.set("sort_reverse", self.sort_reverse)
 
-        self.log_message(f"Sorting by {target_label} ({'descending' if self.sort_reverse else 'ascending'})")
-        
+        logger.info(f"Sorting by {target_label} ({'descending' if self.sort_reverse else 'ascending'})")
+
         # Re-apply filter which includes sorting
+
         search_val = self.query_one("#search_input", Input).value
         self.apply_filter(search_val)
 
@@ -365,9 +514,9 @@ class AudiobookManager(App):
                     return f"{match.group(1)}%"
         else:
             # FFmpeg: time=00:00:00.00
-            book = next((b for b in self.full_library if b.asin == asin), None)
+            book = self._library_lookup.get(asin)
             total_ms = book.duration_ms if book else 0
-            
+
             for line in reversed(history):
                 match = re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
                 if match and total_ms > 0:
@@ -386,20 +535,18 @@ class AudiobookManager(App):
         def save_settings(results: dict | None) -> None:
             if results:
                 self.config.update(results)
-                save_config(self.config)
                 self.notify("Automation settings updated.", severity="information")
 
-        self.push_screen(GeneralSettingsModal(self.config), save_settings)
+        self.push_screen(GeneralSettingsModal(self.config._config), save_settings)
 
     def action_configure_columns(self) -> None:
         """Opens the column configuration modal."""
         all_cols = ["Status", "ASIN", "Author", "Title", "Narrator", "Series", "Year"]
         visible = self.config.get("visible_columns", ["Status", "ASIN", "Author", "Title", "Series"])
-        
+
         def save_columns(new_visible: list[str] | None) -> None:
             if new_visible is not None:
-                self.config["visible_columns"] = new_visible
-                save_config(self.config)
+                self.config.set("visible_columns", new_visible)
                 self.rebuild_table_columns()
                 self.apply_filter(self.search_query)
                 self.notify("Library columns updated.", severity="information")
@@ -419,10 +566,9 @@ class AudiobookManager(App):
                         self.notify(f"Could not create directory: {e}", severity="error")
                         return
 
-                self.config["library_path"] = str(p)
-                save_config(self.config)
+                self.config.set("library_path", str(p))
                 self.notify(f"Library path updated to: {p}", severity="information")
-                self.log_message(f"Library path updated: {p}")
+                logger.info(f"Library path updated: {p}")
                 self.refresh_all_statuses()
 
         self.push_screen(LibraryPathModal(self.config.get("library_path", str(Path.cwd()))), check_path)
@@ -461,10 +607,9 @@ class AudiobookManager(App):
         """Prompts the user to enter their activation bytes."""
         def check_input(bytes_val: str | None) -> None:
             if bytes_val:
-                self.config["activation_bytes"] = bytes_val.strip()
-                save_config(self.config)
+                self.config.set("activation_bytes", bytes_val.strip())
                 self.notify("Activation bytes saved.", severity="information")
-                self.log_message(f"Activation bytes updated.")
+                logger.info(f"Activation bytes updated.")
 
         self.push_screen(ActivationBytesModal(self.config.get("activation_bytes", "")), check_input)
 
@@ -485,37 +630,27 @@ class AudiobookManager(App):
         asin = row_data[asin_idx]
 
         # Find the book
-        book = next((b for b in self.full_library if b.asin == asin), None)
+        book = self._library_lookup.get(asin)
         if not book or not book.queued:
             self.notify("This book is not in the queue.", severity="warning")
             return
 
-        # Rebuild the queue to remove the item
-        # Since asyncio.Queue doesn't support removal, we drain and refill
-        temp_items = []
-        while not self.task_queue.empty():
-            item = self.task_queue.get_nowait()
-            if item != asin:
-                temp_items.append(item)
-            self.task_queue.task_done()
-
-        for item in temp_items:
-            self.task_queue.put_nowait(item)
-
-        book.queued = False
-        book.working_mode = ""
-        self.update_row_status(asin)
-        self.notify(f"Removed '{book.title}' from queue.", severity="information")
-        self.log_message(f"Removed [bold cyan]{asin}[/] from task queue.")
+        if self.task_queue.remove(asin):
+            book.queued = False
+            book.working_mode = ""
+            self.update_row_status(asin)
+            self.notify(f"Removed '{book.title}' from queue.", severity="information")
+            logger.info(f"Removed [bold cyan]{asin}[/] from task queue.")
+        else:
+            self.notify("Could not remove from queue.", severity="error")
 
     def action_toggle_log(self) -> None:
         try:
             log = self.query_one("#log")
             log.display = not log.display
-            self.config["log_visible"] = log.display
-            save_config(self.config)
+            self.config.set("log_visible", log.display)
         except Exception as e:
-            self.log_message(f"Error toggling log: {e}")
+            logger.error(f"Error toggling log: {e}")
 
     def prompt_cleanup(self, asin: str, title: str) -> None:
         """Prompts the user to delete source files."""
@@ -528,26 +663,27 @@ class AudiobookManager(App):
 
     def delete_source_files(self, asin: str, title: str) -> None:
         """Deletes original files after conversion."""
-        book = next((b for b in self.full_library if b.asin == asin), None)
+        book = self._library_lookup.get(asin)
         if not book:
             book = Audiobook(asin=asin, author="Unknown", title=title)
 
-        count = self.service.cleanup_sources(book, self.log_message)
+        count = self.service.cleanup_sources(book, logger.info)
 
         if count > 0:
-            self.log_message(f"Cleaned up [bold cyan]{count}[/] source files for [bold green]'{title}'[/].")
+            logger.info(f"Cleaned up [bold cyan]{count}[/] source files for [bold green]'{title}'[/].")
             self.notify(f"Source files deleted for {title}", severity="information")
             self.refresh_all_statuses()
 
     @work
     async def action_refresh_library(self) -> None:
-        self.log_message("Fetching library...")
+        logger.info("Fetching library...")
         try:
             self.full_library = await self.service.fetch_library()
+            self._library_lookup = {b.asin: b for b in self.full_library}
             self.apply_filter(self.search_query)
-            self.log_message(f"Library refreshed ([bold cyan]{len(self.full_library)}[/] items).")
+            logger.info(f"Library refreshed ([bold cyan]{len(self.full_library)}[/] items).")
         except Exception as e:
-            self.log_message(f"[bold red]Error fetching library: {e}[/]")
+            logger.error(f"Error fetching library: {e}")
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         """Triggers search visibility update whenever focus changes."""
@@ -561,7 +697,13 @@ class AudiobookManager(App):
 
     @on(Input.Changed, "#search_input")
     def on_search_changed(self, event: Input.Changed) -> None:
-        self.search_query = event.value
+        """Debounced search to improve performance."""
+        # Using a timer to delay search until user stops typing
+        if hasattr(self, "_search_timer"):
+            self._search_timer.cancel()
+
+        # 300ms delay is usually a good balance
+        self._search_timer = self.set_timer(0.3, lambda: setattr(self, "search_query", event.value))
 
     def watch_search_query(self, value: str) -> None:
         """Automatically called when search_query changes."""
@@ -577,29 +719,21 @@ class AudiobookManager(App):
         table.clear()
         filter_text = filter_text.lower()
 
-        # Filter
+        # Filter using pre-calculated search text
         filtered_books = [
             book for book in self.full_library 
-            if any(filter_text in str(getattr(book, field, "")).lower() for field in ["asin", "author", "title", "narrator", "series_title", "year"])
+            if filter_text in book._search_text
         ]
 
         # Multi-level sort helper
         def get_sort_key(book: Audiobook):
             keys = []
             for col in self.sort_order:
-                val = str(getattr(book, col, "")).lower()
                 if col == "series_title":
-                    # Sort by series title, then numerically by sequence
-                    try:
-                        # Extract the first number found (handles 1-3, Book 1, etc.)
-                        match = re.search(r'(\d+\.?\d*)', book.series_sequence)
-                        seq = float(match.group(1)) if match else 0.0
-                    except (ValueError, IndexError):
-                        seq = 0.0
-                    keys.append(val)
-                    keys.append(seq)
+                    keys.append(book.series_title.lower())
+                    keys.append(book._series_seq_num)
                 else:
-                    keys.append(val)
+                    keys.append(str(getattr(book, col, "")).lower())
             return tuple(keys)
 
         # Sort
@@ -634,24 +768,8 @@ class AudiobookManager(App):
                     row_data.append(display)
                 elif col == "Year":
                     row_data.append(book.year)
-            
-            table.add_row(*row_data, key=book.asin)
 
-    def log_message(self, message: str) -> None:
-        self.query_one("#log", StatusLog).write(message)
-        
-        # Mirror to persistent log file
-        try:
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            # Strip Rich markup for the plain text file
-            clean_msg = re.sub(r'\[.*?\]', '', message)
-            
-            CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            with open(LOG_FILE, "a") as f:
-                f.write(f"[{timestamp}] {clean_msg}\n")
-        except Exception:
-            pass
+            table.add_row(*row_data, key=book.asin)
 
     def update_row_status(self, asin: str) -> None:
         """Updates the status symbol for a specific ASIN in the table."""
@@ -663,7 +781,7 @@ class AudiobookManager(App):
                 return
 
             asin_idx = list(self.col_keys.values()).index(asin_key)
-            
+
             found = False
             for row_key in table.rows:
                 row_data = table.get_row(row_key)
@@ -672,11 +790,11 @@ class AudiobookManager(App):
                     title_idx = 0
                     if "Title" in self.col_keys:
                         title_idx = list(self.col_keys.values()).index(self.col_keys["Title"])
-                    
+
                     title = row_data[title_idx]
-                    
+
                     # Find the book in full_library to check working state
-                    book = next((b for b in self.full_library if b.asin == asin), None)
+                    book = self._library_lookup.get(asin)
                     new_status = self.service.get_status(asin, title)
                     if book:
                         book.status = new_status
@@ -684,31 +802,26 @@ class AudiobookManager(App):
                     else:
                         # Fallback padding if book not found (unlikely)
                         display_status = f"  {new_status}  " if new_status else "     "
-                    
+
                     table.update_cell(row_key, status_key, display_status, update_width=False)
                     found = True
                     break
 
             if not found:
                 # If not in table, still update full_library
-                for book in self.full_library:
-                    if book.asin == asin:
-                        book.status = self.service.get_status(asin, book.title)
-                        break
+                book = self._library_lookup.get(asin)
+                if book:
+                    book.status = self.service.get_status(asin, book.title)
         except Exception as e:
-            self.log_message(f"Error updating row: {e}")
+            logger.error(f"Error updating row: {e}")
 
     @work
     async def refresh_all_statuses(self) -> None:
         """Updates status for all visible rows in a worker thread."""
         try:
-            # Pre-list directory for faster status checks
-            lib = self.service.library_path
-            file_set = {f.name for f in lib.iterdir()} if lib.exists() else set()
+            # Use the efficient batch status checker
+            status_map = self.service.get_status_map(self.full_library)
 
-            # Create a lookup for full_library to fix O(N^2)
-            library_lookup = {book.asin: book for book in self.full_library}
-            
             table = self.query_one("#library_table", LibraryTable)
             status_key = self.col_keys.get("Status")
             asin_key = self.col_keys.get("ASIN")
@@ -716,38 +829,33 @@ class AudiobookManager(App):
                 return
 
             asin_idx = list(self.col_keys.values()).index(asin_key)
-            # Find Title index
-            title_idx = 0
-            if "Title" in self.col_keys:
-                title_idx = list(self.col_keys.values()).index(self.col_keys["Title"])
 
             for row_key in table.rows:
                 row_data = table.get_row(row_key)
                 asin = row_data[asin_idx]
-                title = row_data[title_idx]
-                new_status = self.service.get_status(asin, title, file_set=file_set)
-                
-                # Sync with full_library
-                book = library_lookup.get(asin)
+                new_status = status_map.get(asin, "")
+
+                # Sync with full_library using cached lookup
+                book = self._library_lookup.get(asin)
                 if book:
                     book.status = new_status
                     display = self._get_status_display(book)
                     table.update_cell(row_key, status_key, display)
-            
+
             table.refresh()
         except Exception as e:
-            self.log_message(f"Error refreshing statuses: {e}")
+            logger.error(f"Error refreshing statuses: {e}")
 
     @on(DataTable.RowSelected, "#library_table")
     def on_row_selected(self, event: DataTable.RowSelected) -> None:
         row_data = event.data_table.get_row_at(event.cursor_row)
-        
+
         asin_key = self.col_keys.get("ASIN")
         if not asin_key:
             return
         asin_idx = list(self.col_keys.values()).index(asin_key)
         asin = row_data[asin_idx]
-        
+
         # Find Title
         title = "Unknown"
         if "Title" in self.col_keys:
@@ -761,7 +869,7 @@ class AudiobookManager(App):
             return
 
         # If already queued, do nothing
-        book = next((b for b in self.full_library if b.asin == asin), None)
+        book = self._library_lookup.get(asin)
         if book and book.queued:
             self.notify(f"'{title}' is already in the queue.", severity="information")
             return
@@ -772,10 +880,10 @@ class AudiobookManager(App):
                 success, error = self.service.play_audiobook(book)
                 if success:
                     self.notify(f"Opening '{title}'...", severity="information")
-                    self.log_message(f"Opened [bold green]'{title}'[/] in default player.")
+                    logger.info(f"Opened [bold green]'{title}'[/] in default player.")
                 else:
                     self.notify(f"Could not open file: {error}", severity="error")
-                    self.log_message(f"Error opening '{title}': {error}")
+                    logger.error(f"[bold red]Error opening[/] [bold green]'{title}'[/]: {error}")
             return
 
         # Add to queue
@@ -785,19 +893,19 @@ class AudiobookManager(App):
                 book.working_mode = "queued_processing"
             else:
                 book.working_mode = "queued_download"
-                
-            self.task_queue.put_nowait(asin)
+
+            self.task_queue.put(asin)
             self.update_row_status(asin)
-            self.notify(f"Added '{title}' to queue.", severity="information")
+            self.notify(f"Added [bold green]'{title}'[/] to queue.", severity="information")
 
     async def download_book(self, asin: str) -> None:
-        book = next((b for b in self.full_library if b.asin == asin), None)
+        book = self._library_lookup.get(asin)
         if book:
             book.working = True
             book.working_mode = "downloading"
             self.update_row_status(asin)
 
-        self.log_message(f"Starting download for [bold cyan]{asin}[/]...")
+        logger.info(f"Starting download for [bold cyan]{asin}[/]...")
         self.active_logs[asin] = {
             "title": f"Downloading {asin}",
             "history": []
@@ -813,19 +921,19 @@ class AudiobookManager(App):
         try:
             res = await self.service.download(asin, log_handler)
             if res == 0:
-                self.log_message(f"Download of [bold cyan]{asin}[/] complete.")
+                logger.info(f"Download of [bold cyan]{asin}[/] complete.")
                 log_handler("\n[bold green]Download Complete![/]")
                 lib = self.service.library_path
                 await self.service.verify_file_exists(lib / f"{asin}*.aax")
 
                 if self.config.get("auto_process", False):
                     # Find the book again to get title
-                    book = next((b for b in self.full_library if b.asin == asin), None)
+                    book = self._library_lookup.get(asin)
                     if book:
                         await self.process_book(asin, book.title)
             else:
 
-                self.log_message(f"Download of [bold cyan]{asin}[/] failed with code {res}")
+                logger.error(f"[bold red]Download of [/][bold cyan]{asin}[/] [bold red]failed with code {res}[/]")
                 log_handler(f"\n[bold red]Failed with code {res}[/]")
         finally:
             if book:
@@ -836,7 +944,7 @@ class AudiobookManager(App):
 
     async def process_book(self, asin: str, title: str) -> None:
         # Find the book in full_library
-        book = next((b for b in self.full_library if b.asin == asin), None)
+        book = self._library_lookup.get(asin)
         if not book:
             # Create a temporary one if not found (shouldn't happen)
             book = Audiobook(asin=asin, author="Unknown", title=title)
@@ -845,7 +953,7 @@ class AudiobookManager(App):
         book.working_mode = "processing"
         self.update_row_status(asin)
 
-        self.log_message(f"Starting process for {asin}...")
+        logger.info(f"Processing [bold cyan]{asin}[/]...")
         self.active_logs[asin] = {
             "title": f"Processing {title}",
             "history": []
@@ -854,20 +962,20 @@ class AudiobookManager(App):
         def log_handler(msg: str):
             if asin in self.active_logs:
                 self.active_logs[asin]["history"].append(msg)
-            
+
             # Propagate to visible screen if it's the right one
             if isinstance(self.screen, ProcessOutputScreen) and self.screen.asin == asin:
                 self.screen.append_log(msg)
-            
+
             # Only log errors or major milestones to the status log (and thus the file)
             if "error" in msg.lower() or "failed" in msg.lower() or "successfully" in msg.lower() or "Prepared" in msg:
-                 self.log_message(msg)
+                 logger.info(msg)
 
         try:
             success = await self.service.process_m4b(book, log_handler)
             if success:
-                self.log_message(f"[bold green]M4B created successfully for {title}[/]")
-                
+                logger.info(f"M4B created successfully for {title}")
+
                 # Verify file renamed successfully before refreshing
                 lib = self.service.library_path
                 await self.service.verify_file_exists(lib / f"{book.safe_title}.m4b")
@@ -877,7 +985,7 @@ class AudiobookManager(App):
                 else:
                     self.prompt_cleanup(asin, title)
             else:
-                self.log_message(f"[bold red]Processing failed for {title}[/]")
+                logger.error(f"Processing failed for {title}")
         finally:
             book.working = False
             book.working_mode = ""
@@ -888,11 +996,11 @@ class AudiobookManager(App):
     async def check_authentication(self) -> None:
         """Verifies if the user is authenticated with audible-cli."""
         if await self.service.is_authenticated():
-            self.log_message("[bold green]Audible authentication verified.[/]")
+            logger.info("[bold green]Audible authentication verified.[/]")
         else:
             self.notify("Audible-cli not authenticated. Please run 'audible login'.", severity="error")
-            self.log_message("[bold red]ERROR: Audible-cli not authenticated.[/]")
-            self.log_message("Please run 'audible login' in your terminal.")
+            logger.error("[bold red]Audible-cli not authenticated.[/]")
+            logger.info("Please run [bold cyan]'audible login'[/] in your terminal.")
 
 if __name__ == "__main__":
     app = AudiobookManager()

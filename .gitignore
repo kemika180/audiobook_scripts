@@ -25,3 +25,4 @@ audiobook_config.json
 .Trashes
 ehthumbs.db
 Thumbs.db
+.coverage
