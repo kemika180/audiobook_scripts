@@ -13,6 +13,7 @@ venv/
 *.jpg
 *-chapters.json
 *-chapters.txt
+*.tmp
 
 # Local Configuration
 audiobook_config.json
