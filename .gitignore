@@ -27,3 +27,6 @@ audiobook_config.json
 ehthumbs.db
 Thumbs.db
 .coverage
+.pytest_cache/
+*.egg-info/
+dist/
