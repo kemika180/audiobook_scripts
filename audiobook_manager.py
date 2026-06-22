@@ -13,6 +13,8 @@ import shutil
 import re
 import asyncio
 import logging
+import argparse
+import sys
 from typing import List, Dict, Iterable, Callable
 from pathlib import Path
 
@@ -32,15 +34,16 @@ from ui.widgets import LibraryTable, SearchInput, StatusLog
 from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal, QueueViewerModal
 
 # Constants
-APP_NAME = "audiobook-manager"
+APP_NAME = "tome"
 CONFIG_DIR = Path(user_config_dir(APP_NAME))
 CONFIG_FILE = CONFIG_DIR / "config.json"
 LOG_FILE = CONFIG_DIR / "activity.log"
 OLD_CONFIG_FILE = Path(__file__).parent / "audiobook_config.json"
+OLD_MANAGER_CONFIG_FILE = Path(user_config_dir("audiobook-manager")) / "config.json"
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
-logger = logging.getLogger("audiobook-manager")
+logger = logging.getLogger("tome")
 logger.setLevel(logging.INFO)
 
 class TuiLogHandler(logging.Handler):
@@ -104,6 +107,14 @@ class ConfigManager:
         self._config = self.load_config()
 
     def load_config(self) -> Dict:
+        # Migration: Check if old audiobook-manager config exists and move it
+        if OLD_MANAGER_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
+            try:
+                CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+                shutil.copy(str(OLD_MANAGER_CONFIG_FILE), str(CONFIG_FILE))
+            except Exception:
+                pass
+
         # Migration: Check if old config exists and move it
         if OLD_CONFIG_FILE.exists() and not CONFIG_FILE.exists():
             try:
@@ -999,6 +1010,276 @@ class AudiobookManager(App):
             logger.error("[bold red]Audible-cli not authenticated.[/]")
             logger.info("Please run [bold cyan]'audible login'[/] in your terminal.")
 
+async def run_cli(args):
+    import sys
+    from rich.console import Console
+    from rich.table import Table
+    console = Console()
+    
+    # Load config
+    config_manager = ConfigManager()
+    config = config_manager._config
+    
+    # Apply overrides
+    if args.library_path:
+        config["library_path"] = args.library_path
+    if args.activation_bytes:
+        config["activation_bytes"] = args.activation_bytes
+        
+    service = AudiobookService(config)
+    
+    # Check library directory
+    lib_path = Path(service.library_path)
+    if not lib_path.exists():
+        try:
+            lib_path.mkdir(parents=True, exist_ok=True)
+            console.print(f"[green]Created library directory:[/] {lib_path}")
+        except Exception as e:
+            console.print(f"[bold red]Error:[/] Library directory '{lib_path}' does not exist and could not be created: {e}")
+            sys.exit(1)
+            
+    if args.subcommand == "list":
+        if not await service.is_authenticated():
+            console.print("[bold red]Error:[/] Audible-cli not authenticated. Please run 'audible login' first.")
+            sys.exit(1)
+            
+        console.print("[yellow]Fetching library from Audible...[/]")
+        try:
+            books = await service.fetch_library()
+        except Exception as e:
+            console.print(f"[bold red]Error fetching library:[/] {e}")
+            sys.exit(1)
+            
+        filtered_books = []
+        for book in books:
+            # Query filter
+            if args.query:
+                q = args.query.lower()
+                matches = (
+                    q in book.title.lower() or 
+                    q in book.author.lower() or 
+                    q in book.asin.lower() or 
+                    (book.series_title and q in book.series_title.lower()) or
+                    (book.narrator and q in book.narrator.lower())
+                )
+                if not matches:
+                    continue
+            
+            # Status filter
+            if args.status:
+                s = args.status.lower()
+                is_match = False
+                if s == "processed":
+                    is_match = "[bold green]" in book.status
+                elif s == "downloaded":
+                    is_match = "[bold yellow]" in book.status
+                elif s == "missing":
+                    is_match = book.status == ""
+                if not is_match:
+                    continue
+                    
+            filtered_books.append(book)
+            
+        if not filtered_books:
+            console.print("[yellow]No books found matching the filters.[/]")
+            return
+            
+        table = Table(title="Audible Library")
+        table.add_column("Status", width=12, justify="center")
+        table.add_column("ASIN", width=12)
+        table.add_column("Title", style="cyan")
+        table.add_column("Author", style="magenta")
+        table.add_column("Series", style="dim")
+        table.add_column("Year", justify="right")
+        
+        for book in filtered_books:
+            # Format status nicely for table
+            if "[bold green]" in book.status:
+                status_display = "[green]Processed[/]"
+            elif "[bold yellow]" in book.status:
+                status_display = "[yellow]Downloaded[/]"
+            else:
+                status_display = "[dim]Missing[/]"
+                
+            series_display = f"{book.series_title} #{book.series_sequence}" if book.series_title else "-"
+            table.add_row(
+                status_display,
+                book.asin,
+                book.title,
+                book.author,
+                series_display,
+                book.year if book.year else "-"
+            )
+        console.print(table)
+        
+    elif args.subcommand == "download":
+        if not await service.is_authenticated():
+            console.print("[bold red]Error:[/] Audible-cli not authenticated. Please run 'audible login' first.")
+            sys.exit(1)
+            
+        if args.auto_process and not service.activation_bytes:
+            console.print("[bold red]Error:[/] Activation bytes are not configured. Use -a <bytes> or configure them in the GUI.")
+            sys.exit(1)
+
+        console.print("[yellow]Fetching library details...[/]")
+        try:
+            books = await service.fetch_library()
+            library_map = {b.asin: b for b in books}
+        except Exception as e:
+            console.print(f"[bold red]Error fetching library:[/] {e}")
+            sys.exit(1)
+
+        for asin in args.asins:
+            book = library_map.get(asin)
+            if not book:
+                console.print(f"[bold red]Error:[/] Book with ASIN '{asin}' was not found in your Audible library.")
+                continue
+                
+            console.print(f"\n[bold cyan]Downloading: {book.title} ({asin})[/]")
+            res = await service.download(asin, lambda msg: console.print(f"  {msg}"))
+            
+            if res == 0:
+                console.print(f"[bold green]Successfully downloaded: {book.title}[/]")
+                await service.verify_file_exists(service.library_path / f"{asin}*.aax")
+                
+                if args.auto_process:
+                    console.print(f"[bold cyan]Processing: {book.title} ({asin})[/]")
+                    success = await service.process_m4b(book, lambda msg: console.print(f"  {msg}"))
+                    if success:
+                        console.print(f"[bold green]Successfully processed to M4B: {book.title}[/]")
+                        if args.auto_cleanup:
+                            console.print(f"[yellow]Cleaning up source files...[/]")
+                            count = service.cleanup_sources(book, lambda msg: console.print(f"  {msg}"))
+                            console.print(f"[green]Cleaned up {count} source files.[/]")
+                    else:
+                        console.print(f"[bold red]Failed to process: {book.title}[/]")
+            else:
+                console.print(f"[bold red]Failed to download ASIN {asin} with exit code {res}.[/]")
+                
+    elif args.subcommand == "process":
+        if not service.activation_bytes:
+            console.print("[bold red]Error:[/] Activation bytes are not configured. Use -a <bytes> or configure them in the GUI.")
+            sys.exit(1)
+            
+        console.print("[yellow]Fetching library details...[/]")
+        try:
+            books = await service.fetch_library()
+            library_map = {b.asin: b for b in books}
+        except Exception as e:
+            console.print(f"[bold red]Error fetching library:[/] {e}")
+            sys.exit(1)
+            
+        for asin in args.asins:
+            book = library_map.get(asin)
+            if not book:
+                console.print(f"[bold red]Error:[/] Book with ASIN '{asin}' was not found in your Audible library.")
+                continue
+                
+            console.print(f"\n[bold cyan]Processing: {book.title} ({asin})[/]")
+            success = await service.process_m4b(book, lambda msg: console.print(f"  {msg}"))
+            if success:
+                console.print(f"[bold green]Successfully processed to M4B: {book.title}[/]")
+                
+                should_cleanup = config.get("auto_cleanup", False)
+                if args.cleanup:
+                    should_cleanup = True
+                elif args.no_cleanup:
+                    should_cleanup = False
+                    
+                if should_cleanup:
+                    console.print(f"[yellow]Cleaning up source files...[/]")
+                    count = service.cleanup_sources(book, lambda msg: console.print(f"  {msg}"))
+                    console.print(f"[green]Cleaned up {count} source files.[/]")
+            else:
+                console.print(f"[bold red]Failed to process: {book.title}[/]")
+                
+    elif args.subcommand == "sync":
+        if not await service.is_authenticated():
+            console.print("[bold red]Error:[/] Audible-cli not authenticated. Please run 'audible login' first.")
+            sys.exit(1)
+            
+        if not service.activation_bytes:
+            console.print("[bold red]Error:[/] Activation bytes are not configured. Use -a <bytes> or configure them in the GUI.")
+            sys.exit(1)
+
+        console.print("[yellow]Fetching library details...[/]")
+        try:
+            books = await service.fetch_library()
+            library_map = {b.asin: b for b in books}
+        except Exception as e:
+            console.print(f"[bold red]Error fetching library:[/] {e}")
+            sys.exit(1)
+
+        for asin in args.asins:
+            book = library_map.get(asin)
+            if not book:
+                console.print(f"[bold red]Error:[/] Book with ASIN '{asin}' was not found in your Audible library.")
+                continue
+                
+            console.print(f"\n[bold cyan]Downloading: {book.title} ({asin})[/]")
+            res = await service.download(asin, lambda msg: console.print(f"  {msg}"))
+            
+            if res == 0:
+                console.print(f"[bold green]Successfully downloaded: {book.title}[/]")
+                await service.verify_file_exists(service.library_path / f"{asin}*.aax")
+                
+                console.print(f"[bold cyan]Processing: {book.title} ({asin})[/]")
+                success = await service.process_m4b(book, lambda msg: console.print(f"  {msg}"))
+                if success:
+                    console.print(f"[bold green]Successfully processed to M4B: {book.title}[/]")
+                    if args.cleanup or config.get("auto_cleanup", False):
+                        console.print(f"[yellow]Cleaning up source files...[/]")
+                        count = service.cleanup_sources(book, lambda msg: console.print(f"  {msg}"))
+                        console.print(f"[green]Cleaned up {count} source files.[/]")
+                else:
+                    console.print(f"[bold red]Failed to process: {book.title}[/]")
+            else:
+                console.print(f"[bold red]Failed to download ASIN {asin} with exit code {res}.[/]")
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Audiobook Manager CLI & TUI",
+        formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    # Global options
+    parser.add_argument("-l", "--library-path", help="Override the library directory path")
+    parser.add_argument("-a", "--activation-bytes", help="Override the 8-character Audible activation bytes")
+    
+    subparsers = parser.add_subparsers(dest="subcommand", help="CLI Subcommands (omitting launches the TUI)")
+    
+    # Subcommand: list
+    list_parser = subparsers.add_parser("list", help="List audiobooks in your Audible library and their local status")
+    list_parser.add_argument("-s", "--status", choices=["processed", "downloaded", "missing"], help="Filter by status (processed/downloaded/missing)")
+    list_parser.add_argument("-q", "--query", help="Filter by search query (title, author, series, ASIN)")
+    
+    # Subcommand: download
+    download_parser = subparsers.add_parser("download", help="Download audiobook(s) from Audible by ASIN")
+    download_parser.add_argument("asins", nargs="+", help="One or more audiobook ASINs to download")
+    download_parser.add_argument("--auto-process", action="store_true", help="Automatically process/convert the book after downloading")
+    download_parser.add_argument("--auto-cleanup", action="store_true", help="Automatically delete source files after processing (if --auto-process is set)")
+    
+    # Subcommand: process
+    process_parser = subparsers.add_parser("process", help="Process/convert downloaded AAX files to M4B by ASIN")
+    process_parser.add_argument("asins", nargs="+", help="One or more audiobook ASINs to process")
+    process_parser.add_argument("--cleanup", action="store_true", help="Automatically delete original AAX files after successful processing")
+    process_parser.add_argument("--no-cleanup", action="store_true", help="Do not delete original AAX files after processing")
+    
+    # Subcommand: sync
+    sync_parser = subparsers.add_parser("sync", help="Download and process/convert audiobook(s) by ASIN")
+    sync_parser.add_argument("asins", nargs="+", help="One or more audiobook ASINs to sync")
+    sync_parser.add_argument("--cleanup", action="store_true", help="Automatically delete original AAX files after successful processing")
+
+    args = parser.parse_args()
+    
+    if args.subcommand is None:
+        app = AudiobookManager()
+        app.run()
+    else:
+        try:
+            asyncio.run(run_cli(args))
+        except KeyboardInterrupt:
+            print("\nOperation cancelled by user.")
+            sys.exit(130)
+
 if __name__ == "__main__":
-    app = AudiobookManager()
-    app.run()
+    main()

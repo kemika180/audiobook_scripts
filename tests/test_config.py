@@ -7,9 +7,11 @@ from audiobook_manager import ConfigManager
 
 def test_config_default_values():
     with patch("audiobook_manager.CONFIG_FILE") as mock_file, \
-         patch("audiobook_manager.OLD_CONFIG_FILE") as mock_old:
+         patch("audiobook_manager.OLD_CONFIG_FILE") as mock_old, \
+         patch("audiobook_manager.OLD_MANAGER_CONFIG_FILE") as mock_old_mgr:
         mock_file.exists.return_value = False
         mock_old.exists.return_value = False
+        mock_old_mgr.exists.return_value = False
         
         manager = ConfigManager()
         assert manager.get("theme") == "tokyo-night"
@@ -21,7 +23,8 @@ def test_config_save_load(tmp_path):
     
     with patch("audiobook_manager.CONFIG_FILE", config_file), \
          patch("audiobook_manager.CONFIG_DIR", config_dir), \
-         patch("audiobook_manager.OLD_CONFIG_FILE", tmp_path / "old.json"):
+         patch("audiobook_manager.OLD_CONFIG_FILE", tmp_path / "old.json"), \
+         patch("audiobook_manager.OLD_MANAGER_CONFIG_FILE", tmp_path / "old_mgr.json"):
         
         manager = ConfigManager()
         manager.set("theme", "dracula")
@@ -44,7 +47,8 @@ def test_config_migration(tmp_path):
         
     with patch("audiobook_manager.CONFIG_FILE", new_file), \
          patch("audiobook_manager.CONFIG_DIR", config_dir), \
-         patch("audiobook_manager.OLD_CONFIG_FILE", old_file):
+         patch("audiobook_manager.OLD_CONFIG_FILE", old_file), \
+         patch("audiobook_manager.OLD_MANAGER_CONFIG_FILE", tmp_path / "old_mgr.json"):
         
         manager = ConfigManager()
         assert manager.get("theme") == "monokai"

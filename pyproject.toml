@@ -1,5 +1,5 @@
 [project]
-name = "audiobook-scripts"
+name = "tome"
 version = "0.1.0"
 description = "A unified, keyboard-centric terminal user interface for managing your Audible library."
 readme = "README.md"
@@ -12,7 +12,10 @@ dependencies = [
 ]
 
 [project.scripts]
-audiobook-manager = "audiobook_manager:main"
+tome = "audiobook_manager:main"
+
+[tool.setuptools]
+py-modules = ["audiobook_manager", "models", "service", "utils", "exceptions"]
 
 [tool.uv]
 package = true

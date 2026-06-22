@@ -1,6 +1,6 @@
-# Audiobook Manager TUI
+# Tome
 
-A unified, keyboard-centric terminal user interface for managing your Audible library. Download audiobooks, convert them to M4B with chapters and cover art, and track your local collection—all from a single, streamlined interface.  
+A unified, keyboard-centric audiobook manager for managing your Audible library. Download audiobooks, convert them to M4B with chapters and cover art, and track your local collection—all via a keyboard-centric terminal user interface (TUI) or headless command-line subcommands.
 <br/><img width="1916" height="1028" alt="audiobook tui 2" src="https://github.com/user-attachments/assets/512af169-652d-4466-97da-1e0d249b641e" />
 
 ## Features
@@ -38,7 +38,7 @@ This project uses `uv` to manage Python dependencies automatically.
 
 - **Installation:** `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
-## Getting Started
+## Getting Started & Installation
 
 First, clone the repository to your local machine:
 
@@ -47,13 +47,47 @@ git clone https://github.com/kemika180/audiobook_scripts.git
 cd audiobook_scripts
 ```
 
-Then, simply run the manager using `uv`:
+Install the application globally on your system to run it from anywhere:
 
 ```bash
-uv run audiobook_manager.py
+uv tool install .
 ```
 
-`uv` will automatically create a virtual environment, install all dependencies, and launch the application.
+`uv` will automatically package the app, configure its virtual environment with all required dependencies, and install the `tome` executable globally.
+
+To launch the interactive TUI, run:
+```bash
+tome
+```
+
+### Command Line Interface (CLI)
+
+The manager supports headless command-line subcommands for listing, downloading, converting, and syncing books from anywhere:
+
+```bash
+# List your library and show local download status
+tome list
+
+# Filter list by status (processed/downloaded/missing) or search query
+tome list --status processed --query "Sanderson"
+
+# Download a book by its ASIN
+tome download B01N26S3S6
+
+# Download and automatically process/convert to M4B and clean up source files
+tome download B01N26S3S6 --auto-process --auto-cleanup
+
+# Process/convert already downloaded AAX files to M4B by ASIN
+tome process B01N26S3S6 --cleanup
+
+# Download and process in a single sync command
+tome sync B01N26S3S6 --cleanup
+```
+
+Global options like `--library-path` / `-l` and `--activation-bytes` / `-a` are available to override your saved settings on the fly:
+```bash
+tome -l /path/to/library -a 12345678 sync B01N26S3S6
+```
 
 ### Activation Bytes
 

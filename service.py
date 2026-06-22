@@ -493,10 +493,9 @@ class AudiobookService:
                 cmd.extend(["-i", str(cover_path)])
                 # Map audio from 0, metadata from 1, cover from 2
                 # -map_metadata -1 strips all metadata first
-                # -map_metadata 1 then applies our clean metadata file
                 cmd.extend([
                     "-map", "0:a", "-map", "2:v", 
-                    "-map_metadata", "-1", "-map_metadata", "1", 
+                    "-map_metadata", "1", 
                     "-map_chapters", "1",
                     "-c:a", "copy", "-c:v", "copy", 
                     "-disposition:v:0", "attached_pic"
@@ -504,7 +503,7 @@ class AudiobookService:
             else:
                 cmd.extend([
                     "-map", "0:a", 
-                    "-map_metadata", "-1", "-map_metadata", "1", 
+                    "-map_metadata", "1", 
                     "-map_chapters", "1",
                     "-c:a", "copy"
                 ])

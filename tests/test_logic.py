@@ -73,9 +73,9 @@ def test_convert_chapters_json_to_ffmetadata():
     assert "TIMEBASE=1/1000" in result
     assert "START=0" in result
     assert "END=1000" in result
-    assert "TITLE=Chapter 1" in result
+    assert "title=Chapter 1" in result
     # Check recursive
-    assert "TITLE=Subchapter 2.1" in result
+    assert "title=Subchapter 2.1" in result
     assert "START=1000" in result
     assert "END=1500" in result
 
@@ -96,7 +96,7 @@ def test_convert_chapters_with_tags():
     tags = {"title": "My Book", "artist": "The Author"}
     result = convert_chapters_json_to_ffmetadata(sample_json, tags=tags)
     
-    assert "TITLE=My Book" in result
-    assert "ARTIST=The Author" in result
+    assert "title=My Book" in result
+    assert "artist=The Author" in result
     # Check that tags come before chapters usually (per my implementation)
-    assert result.index("TITLE=My Book") < result.index("[CHAPTER]")
+    assert result.index("title=My Book") < result.index("[CHAPTER]")

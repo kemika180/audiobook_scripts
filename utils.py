@@ -55,7 +55,7 @@ def convert_chapters_json_to_ffmetadata(json_data: dict, tags: dict = None) -> l
             output.append("TIMEBASE=1/1000")
             output.append(f"START={start_time}")
             output.append(f"END={end_time}")
-            output.append(f"TITLE={title_str}")
+            output.append(f"title={title_str}")
             if "chapters" in item:
                 output.extend(_convert_recursive(item['chapters']))
         return output
@@ -66,7 +66,7 @@ def convert_chapters_json_to_ffmetadata(json_data: dict, tags: dict = None) -> l
     if tags:
         for key, val in tags.items():
             if val:
-                output_list.append(f"{key.upper()}={_escape(str(val))}")
+                output_list.append(f"{key.lower()}={_escape(str(val))}")
 
     chapters = json_data['content_metadata']['chapter_info']['chapters']
     output_list.extend(_convert_recursive(chapters))
