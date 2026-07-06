@@ -52,13 +52,21 @@ class SearchInput(Input):
     def action_focus_library(self) -> None:
         self.app.query_one("#library_table").focus()
 
-class StatusLog(RichLog, NavigationMixin):
-    """A RichLog with custom bindings for the footer."""
-    BINDINGS = NavigationMixin.BINDINGS
+class StatusLog(RichLog):
+    """A RichLog for displaying logs."""
+    pass
 
-class LibraryTable(DataTable, NavigationMixin):
-    """A DataTable with custom bindings for the footer."""
-    BINDINGS = NavigationMixin.BINDINGS
+class LibraryTable(DataTable):
+    """A DataTable with custom bindings for the library."""
+    BINDINGS = [
+        Binding("up,k", "cursor_up", "Cursor Up", show=False),
+        Binding("down,j", "cursor_down", "Cursor Down", show=False),
+        Binding("left,h", "cursor_left", "Cursor Left", show=False),
+        Binding("right,l", "cursor_right", "Cursor Right", show=False),
+        Binding("home,g", "scroll_top", "Scroll Top", show=False),
+        Binding("end,G", "scroll_bottom", "Scroll Bottom", show=False),
+        Binding("space,enter", "toggle_select", "Toggle Select", show=False),
+    ]
 
     def _scroll_cursor_into_view(self, animate: bool = False) -> None:
         """Manually implement scrolloff to preserve horizontal scroll stability."""
@@ -93,6 +101,30 @@ class LibraryTable(DataTable, NavigationMixin):
         except Exception:
             super()._scroll_cursor_into_view(animate)
 
+
+    def action_scroll_top(self) -> None:
+        """Move cursor to the very first row."""
+        self.move_cursor(row=0)
+
+    def action_scroll_bottom(self) -> None:
+        """Move cursor to the very last row."""
+        self.move_cursor(row=self.row_count - 1)
+
+    def action_toggle_select(self) -> None:
+        """Toggles row selection via app controller."""
+        self.app.action_toggle_select()
+
+
+class QueueTable(DataTable):
+    """A DataTable with custom bindings for the queue tab."""
+    BINDINGS = [
+        Binding("up,k", "cursor_up", "Cursor Up", show=False),
+        Binding("down,j", "cursor_down", "Cursor Down", show=False),
+        Binding("left,h", "cursor_left", "Cursor Left", show=False),
+        Binding("right,l", "cursor_right", "Cursor Right", show=False),
+        Binding("home,g", "scroll_top", "Scroll Top", show=False),
+        Binding("end,G", "scroll_bottom", "Scroll Bottom", show=False),
+    ]
 
     def action_scroll_top(self) -> None:
         """Move cursor to the very first row."""

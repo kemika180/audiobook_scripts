@@ -14,7 +14,7 @@ def test_config_default_values():
         mock_old_mgr.exists.return_value = False
         
         manager = ConfigManager()
-        assert manager.get("theme") == "tokyo-night"
+        assert manager.get("theme") == "kemika-purple"
         assert manager.get("auto_cleanup") is False
 
 def test_config_save_load(tmp_path):

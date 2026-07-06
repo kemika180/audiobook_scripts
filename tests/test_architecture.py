@@ -9,7 +9,7 @@ def test_config_manager_defaults():
     # Test that ConfigManager loads defaults when no file exists
     with patch("pathlib.Path.exists", return_value=False):
         cm = ConfigManager()
-        assert cm.get("theme") == "tokyo-night"
+        assert cm.get("theme") == "kemika-purple"
         assert cm.get("auto_cleanup") is False
         assert cm["sort_reverse"] is False
 

@@ -23,14 +23,15 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
 from textual.app import App, ComposeResult, SystemCommand
 from textual.binding import Binding
-from textual.widgets import Header, Footer, DataTable, Input
+from textual.widgets import Header, Footer, DataTable, Input, TabbedContent, TabPane, Label
 from textual import work, on, events
 from textual.reactive import reactive
 from textual.screen import Screen
+from textual.theme import Theme
 
 from models import Audiobook
 from service import AudiobookService
-from ui.widgets import LibraryTable, SearchInput, StatusLog
+from ui.widgets import LibraryTable, SearchInput, StatusLog, QueueTable
 from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal, QueueViewerModal
 
 # Constants
@@ -92,7 +93,7 @@ class ConfigManager:
     """Manages application configuration loading, saving, and migrations."""
 
     DEFAULT_CONFIG = {
-        "theme": "tokyo-night", 
+        "theme": "kemika-purple", 
         "log_visible": True,
         "activation_bytes": "",
         "library_path": str(Path.cwd()),
@@ -217,8 +218,40 @@ class TaskQueueManager:
         """Returns the number of items in the queue."""
         return len(self.items)
 
+kemika_purple_theme = Theme(
+    name="kemika-purple",
+    primary="#5c3b8a",
+    secondary="#2f2c4a",
+    background="#0f0f15",
+    surface="#141320",
+    panel="#12121a",
+    foreground="#e2e2e9",
+    accent="#cbb2ff",
+    boost="#1e1d32",
+    variables={
+        "scrollbar": "#5c3b8a",
+        "scrollbar-hover": "#7b52ab",
+        "scrollbar-active": "#cbb2ff",
+        "scrollbar-background": "#0d0c15",
+        "scrollbar-background-hover": "#0d0c15",
+        "scrollbar-background-active": "#0d0c15",
+        "scrollbar-corner-color": "#0d0c15",
+    },
+    dark=True,
+)
+
 class AudiobookManager(App):
     CSS = """
+    Screen {
+        overflow: hidden;
+        scrollbar-size: 0 0;
+    }
+    TabbedContent, ContentSwitcher, TabPane {
+        overflow: hidden;
+    }
+    Widget {
+        scrollbar-size: 1 2;
+    }
     DataTable {
         height: 1fr;
     }
@@ -233,14 +266,29 @@ class AudiobookManager(App):
         margin: 0 1;
         display: none;
     }
+    .status-label {
+        margin: 0 1;
+        color: $text-muted;
+    }
+    DataTable > .datatable--selected {
+        background: $secondary;
+        color: $foreground;
+    }
     """
 
     TITLE = "Audiobook Manager"
     COMMAND_PALETTE_BINDING = ":"
 
     BINDINGS = [
-        Binding(":", "command_palette", "Command"),
-        Binding("q", "quit", "Quit"),
+        Binding("q", "quit", "Quit", show=True),
+        Binding("s", "refresh_library", "Sync/Scan", show=True),
+        Binding("d", "process_selected", "Process Selected", show=True),
+        Binding("a", "select_all", "Select All", show=True),
+        Binding("u", "deselect_all", "Deselect All", show=True),
+        Binding("grave,backtick", "toggle_log", "Toggle Log", show=False),
+        Binding("H,shift+h", "prev_tab", "Prev Tab", show=False),
+        Binding("L,shift+l", "next_tab", "Next Tab", show=False),
+        Binding(":", "command_palette", "Command", show=False),
     ]
 
     search_query = reactive("")
@@ -255,6 +303,7 @@ class AudiobookManager(App):
         self.col_keys = {}
         self.sort_order = self.config.get("sort_order", ["title", "author", "asin"])
         self.sort_reverse = self.config.get("sort_reverse", False)
+        self.selected_books = set()
         
         # Filesystem watcher
         self.observer = None
@@ -280,9 +329,16 @@ class AudiobookManager(App):
                 logger.info(f"Theme saved: {theme}")
 
     def compose(self) -> ComposeResult:
-        yield Header()
-        yield SearchInput(placeholder="Filter library (ASIN, Author, or Title)...", id="search_input")
-        yield LibraryTable(id="library_table")
+        yield Header(show_clock=True)
+        with TabbedContent(initial="library-tab"):
+            with TabPane("Library", id="library-tab"):
+                yield SearchInput(placeholder="Filter library (ASIN, Author, or Title)...", id="search_input")
+                yield LibraryTable(id="library_table")
+                yield Label("0 books selected | 0 books loaded", id="library-status", classes="status-label")
+                
+            with TabPane("Queue", id="queue-tab"):
+                yield QueueTable(id="queue-table")
+
         yield StatusLog(id="log", markup=True, highlight=False)
         yield Footer()
 
@@ -305,19 +361,26 @@ class AudiobookManager(App):
         # Check authentication
         self.check_authentication()
 
+        self.register_theme(kemika_purple_theme)
         # Apply the saved theme from config
-        saved_theme = self.config.get("theme", "tokyo-night")
+        saved_theme = self.config.get("theme", "kemika-purple")
         self.theme = saved_theme
 
         # Restore log visibility
         log = self.query_one("#log")
         log.display = self.config.get("log_visible", True)
 
+        # Initialize QueueTable columns
+        queue_table = self.query_one("#queue-table", QueueTable)
+        queue_table.add_columns("Pos", "Action", "Progress", "Title", "ASIN")
+        queue_table.cursor_type = "row"
+
         self.rebuild_table_columns()
         self.action_refresh_library()
 
         # Start background workers
         self.set_interval(0.1, self.animate_spinners)
+        self.set_interval(1.0, self.update_queue_table)
         self.process_queue()
 
         # Start filesystem watcher
@@ -628,6 +691,204 @@ class AudiobookManager(App):
     def action_select_row(self) -> None:
         self.query_one("#library_table").action_select_cursor()
 
+    def action_toggle_select(self) -> None:
+        """Toggles selection on the highlighted row, or plays the book if it is already processed."""
+        table = self.query_one("#library_table", LibraryTable)
+        if table.cursor_row is None or table.cursor_row < 0 or table.cursor_row >= len(table.rows):
+            return
+            
+        row_key = list(table.rows.keys())[table.cursor_row]
+        book_id = str(row_key.value)
+        book = self._library_lookup.get(book_id)
+        if not book:
+            return
+            
+        # Check if the book is already processed (✔)
+        status = self.service.get_status(book_id, book.title)
+        if "✔" in status:
+            # Play the book
+            success, error = self.service.play_audiobook(book)
+            if success:
+                self.notify(f"Opening '{book.title}'...", severity="information")
+                logger.info(f"Opened [bold green]'{book.title}'[/] in default player.")
+            else:
+                self.notify(f"Could not open file: {error}", severity="error")
+                logger.error(f"[bold red]Error opening[/] [bold green]'{book.title}'[/]: {error}")
+            return
+            
+        # Toggle selection
+        if book_id in self.selected_books:
+            self.selected_books.remove(book_id)
+            table.remove_row_class(row_key, "datatable--selected")
+        else:
+            self.selected_books.add(book_id)
+            table.add_row_class(row_key, "datatable--selected")
+            
+        self.update_status_label()
+
+    def update_status_label(self) -> None:
+        """Updates the status label under the library table."""
+        try:
+            selected_count = len(self.selected_books)
+            loaded_count = len(self.full_library)
+            status_label = self.query_one("#library-status", Label)
+            status_label.update(f"{selected_count} books selected | {loaded_count} books loaded")
+        except Exception:
+            pass
+
+    def action_process_selected(self) -> None:
+        """Queues all selected books for processing."""
+        if not self.selected_books:
+            self.notify("No books selected to process.", severity="warning")
+            return
+
+        table = self.query_one("#library_table", LibraryTable)
+        queued_count = 0
+        for asin in list(self.selected_books):
+            book = self._library_lookup.get(asin)
+            if not book:
+                continue
+            
+            if book.queued or book.working_mode:
+                continue
+                
+            status = self.service.get_status(asin, book.title)
+            if "✔" in status:
+                continue
+                
+            book.queued = True
+            if "⬇" in status:
+                book.working_mode = "queued_processing"
+            else:
+                book.working_mode = "queued_download"
+                
+            self.task_queue.put(asin)
+            self.update_row_status(asin)
+            queued_count += 1
+            
+        if queued_count > 0:
+            self.notify(f"Added {queued_count} books to queue.", severity="information")
+            logger.info(f"Queued {queued_count} books for background processing.")
+        
+        # Clear selected_books and reset highlights
+        for asin in list(self.selected_books):
+            try:
+                table.remove_row_class(asin, "datatable--selected")
+            except Exception:
+                pass
+        self.selected_books.clear()
+        self.update_status_label()
+        
+        # Switch to Queue tab and update
+        try:
+            self.query_one(TabbedContent).active = "queue-tab"
+        except Exception:
+            pass
+        self.update_queue_table()
+
+    def action_select_all(self) -> None:
+        """Selects all currently visible audiobooks in the library table."""
+        table = self.query_one("#library_table", LibraryTable)
+        visible_asins = []
+        for row_key in table.rows:
+            visible_asins.append(str(row_key.value))
+            
+        for asin in visible_asins:
+            book = self._library_lookup.get(asin)
+            if book:
+                status = self.service.get_status(asin, book.title)
+                if "✔" in status:
+                    continue
+                self.selected_books.add(asin)
+                try:
+                    table.add_row_class(asin, "datatable--selected")
+                except Exception:
+                    pass
+                
+        self.update_status_label()
+        table.refresh()
+
+    def action_deselect_all(self) -> None:
+        """Deselects all selected audiobooks."""
+        table = self.query_one("#library_table", LibraryTable)
+        for asin in list(self.selected_books):
+            try:
+                table.remove_row_class(asin, "datatable--selected")
+            except Exception:
+                pass
+        self.selected_books.clear()
+        self.update_status_label()
+        table.refresh()
+
+    def update_queue_table(self) -> None:
+        """Updates the queue table in the Queue tab."""
+        try:
+            table = self.query_one("#queue-table", QueueTable)
+        except Exception:
+            return
+            
+        items = []
+        # Active items
+        for asin, log_data in self.active_logs.items():
+            book = self._library_lookup.get(asin)
+            progress = self._extract_progress(asin)
+            items.append({
+                "asin": asin,
+                "title": book.title if book else "Unknown",
+                "action": "Processing" if "Processing" in log_data["title"] else "Downloading",
+                "progress": progress if progress else "..."
+            })
+            
+        # Queued items
+        queued_books = [b for b in self.full_library if b.queued]
+        for book in queued_books:
+            status = self.service.get_status(book.asin, book.title)
+            action = "Download" if status == "" else "Process"
+            items.append({
+                "asin": book.asin,
+                "title": book.title,
+                "action": f"Queued ({action})",
+                "progress": ""
+            })
+            
+        # Save state
+        scroll_x, scroll_y = table.scroll_offset
+        cursor_coord = table.cursor_coordinate
+        
+        table.clear()
+        
+        for i, item in enumerate(items, 1):
+            table.add_row(
+                str(i),
+                item.get("action", ""),
+                item.get("progress", ""),
+                item.get("title", ""),
+                item.get("asin", ""),
+                key=item.get("asin")
+            )
+            
+        # Restore state
+        table.scroll_to(x=scroll_x, y=scroll_y, animate=False)
+        if cursor_coord and table.row_count > 0:
+            try:
+                table.move_cursor(row=min(cursor_coord.row, table.row_count - 1), column=cursor_coord.column)
+            except Exception:
+                pass
+
+    def action_prev_tab(self) -> None:
+        """Switch to previous tab in TabbedContent."""
+        try:
+            self.query_one(TabbedContent).query_one("Tabs").action_previous_tab()
+        except Exception:
+            pass
+
+    def action_next_tab(self) -> None:
+        """Switch to next tab in TabbedContent."""
+        try:
+            self.query_one(TabbedContent).query_one("Tabs").action_next_tab()
+        except Exception:
+            pass
+
     def action_remove_from_queue(self) -> None:
         """Removes the selected book from the background task queue."""
         table = self.query_one("#library_table", LibraryTable)
@@ -783,6 +1044,17 @@ class AudiobookManager(App):
 
             table.add_row(*row_data, key=book.asin)
 
+        # Re-apply selected class for selected books
+        for row_key in table.rows:
+            asin = str(row_key.value)
+            if asin in self.selected_books:
+                try:
+                    table.add_row_class(row_key, "datatable--selected")
+                except Exception:
+                    pass
+
+        self.update_status_label()
+
     def update_row_status(self, asin: str) -> None:
         """Updates the status symbol for a specific ASIN in the table."""
         try:
@@ -868,47 +1140,22 @@ class AudiobookManager(App):
         asin_idx = list(self.col_keys.values()).index(asin_key)
         asin = row_data[asin_idx]
 
-        # Find Title
-        title = "Unknown"
-        if "Title" in self.col_keys:
-            title_idx = list(self.col_keys.values()).index(self.col_keys["Title"])
-            title = row_data[title_idx]
-
         # If the book is already working, show its output screen
         if asin in self.active_logs:
             log_data = self.active_logs[asin]
             self.push_screen(ProcessOutputScreen(log_data["title"], asin, log_data["history"]))
             return
 
-        # If already queued, do nothing
-        book = self._library_lookup.get(asin)
-        if book and book.queued:
-            self.notify(f"'{title}' is already in the queue.", severity="information")
-            return
+        self.action_toggle_select()
 
-        status = self.service.get_status(asin, title)
-        if "✔" in status:
-            if book:
-                success, error = self.service.play_audiobook(book)
-                if success:
-                    self.notify(f"Opening '{title}'...", severity="information")
-                    logger.info(f"Opened [bold green]'{title}'[/] in default player.")
-                else:
-                    self.notify(f"Could not open file: {error}", severity="error")
-                    logger.error(f"[bold red]Error opening[/] [bold green]'{title}'[/]: {error}")
-            return
-
-        # Add to queue
-        if book:
-            book.queued = True
-            if "⬇" in status:
-                book.working_mode = "queued_processing"
-            else:
-                book.working_mode = "queued_download"
-
-            self.task_queue.put(asin)
-            self.update_row_status(asin)
-            self.notify(f"Added [bold green]'{title}'[/] to queue.", severity="information")
+    @on(DataTable.RowSelected, "#queue-table")
+    def on_queue_row_selected(self, event: DataTable.RowSelected) -> None:
+        row_data = event.data_table.get_row_at(event.cursor_row)
+        if len(row_data) > 4:
+            asin = row_data[4]
+            if asin in self.active_logs:
+                log_data = self.active_logs[asin]
+                self.push_screen(ProcessOutputScreen(log_data["title"], asin, log_data["history"]))
 
     async def download_book(self, asin: str) -> None:
         book = self._library_lookup.get(asin)
