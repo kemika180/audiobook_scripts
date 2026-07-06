@@ -58,6 +58,8 @@ class StatusLog(RichLog):
 
 class LibraryTable(DataTable):
     """A DataTable with custom bindings for the library."""
+    COMPONENT_CLASSES = DataTable.COMPONENT_CLASSES | {"datatable--selected"}
+
     BINDINGS = [
         Binding("up,k", "cursor_up", "Cursor Up", show=False),
         Binding("down,j", "cursor_down", "Cursor Down", show=False),
@@ -66,6 +68,7 @@ class LibraryTable(DataTable):
         Binding("home,g", "scroll_top", "Scroll Top", show=False),
         Binding("end,G", "scroll_bottom", "Scroll Bottom", show=False),
         Binding("space,enter", "toggle_select", "Toggle Select", show=False),
+        Binding("/", "focus_search", "Search", show=False),
     ]
 
     def _scroll_cursor_into_view(self, animate: bool = False) -> None:
@@ -114,6 +117,42 @@ class LibraryTable(DataTable):
         """Toggles row selection via app controller."""
         self.app.action_toggle_select()
 
+    def action_focus_search(self) -> None:
+        """Focuses the search bar."""
+        self.app.action_focus_search()
+
+    def _get_row_style(self, row_index: int, base_style) -> "Style":
+        from rich.style import Style
+        row_style = super()._get_row_style(row_index, base_style)
+        if row_index >= 0 and row_index < len(self.rows):
+            try:
+                row_key = list(self.rows.keys())[row_index]
+                asin = str(row_key.value)
+                if asin in self.app.selected_books:
+                    selected_style = self.get_component_styles("datatable--selected").rich_style
+                    row_style = row_style + selected_style
+            except Exception:
+                pass
+        return row_style
+
+    def add_row_class(self, row_key, class_name: str) -> None:
+        """Visual selection highlight handler."""
+        if class_name == "datatable--selected":
+            try:
+                row_index = self.get_row_index(row_key)
+                self.refresh_row(row_index)
+            except Exception:
+                self.refresh()
+
+    def remove_row_class(self, row_key, class_name: str) -> None:
+        """Visual selection removal handler."""
+        if class_name == "datatable--selected":
+            try:
+                row_index = self.get_row_index(row_key)
+                self.refresh_row(row_index)
+            except Exception:
+                self.refresh()
+
 
 class QueueTable(DataTable):
     """A DataTable with custom bindings for the queue tab."""
@@ -124,6 +163,7 @@ class QueueTable(DataTable):
         Binding("right,l", "cursor_right", "Cursor Right", show=False),
         Binding("home,g", "scroll_top", "Scroll Top", show=False),
         Binding("end,G", "scroll_bottom", "Scroll Bottom", show=False),
+        Binding("/", "focus_search", "Search", show=False),
     ]
 
     def action_scroll_top(self) -> None:
@@ -133,3 +173,7 @@ class QueueTable(DataTable):
     def action_scroll_bottom(self) -> None:
         """Move cursor to the very last row."""
         self.move_cursor(row=self.row_count - 1)
+
+    def action_focus_search(self) -> None:
+        """Focuses the search bar."""
+        self.app.action_focus_search()

@@ -32,7 +32,7 @@ from textual.theme import Theme
 from models import Audiobook
 from service import AudiobookService
 from ui.widgets import LibraryTable, SearchInput, StatusLog, QueueTable
-from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal, QueueViewerModal
+from ui.screens import ProcessOutputScreen, ConfirmModal, ActivationBytesModal, LibraryPathModal, ColumnSettingsModal, GeneralSettingsModal
 
 # Constants
 APP_NAME = "tome"
@@ -246,6 +246,9 @@ class AudiobookManager(App):
         overflow: hidden;
         scrollbar-size: 0 0;
     }
+    TabbedContent {
+        height: 1fr;
+    }
     TabbedContent, ContentSwitcher, TabPane {
         overflow: hidden;
     }
@@ -270,7 +273,7 @@ class AudiobookManager(App):
         margin: 0 1;
         color: $text-muted;
     }
-    DataTable > .datatable--selected {
+    LibraryTable > .datatable--selected {
         background: $secondary;
         color: $foreground;
     }
@@ -285,7 +288,9 @@ class AudiobookManager(App):
         Binding("d", "process_selected", "Process Selected", show=True),
         Binding("a", "select_all", "Select All", show=True),
         Binding("u", "deselect_all", "Deselect All", show=True),
-        Binding("grave,backtick", "toggle_log", "Toggle Log", show=False),
+        Binding("x", "remove_from_queue", "Dequeue", show=True),
+        Binding("/", "focus_search", "Search", show=True),
+        Binding("`,grave,backtick", "toggle_log", "Toggle Log", show=False),
         Binding("H,shift+h", "prev_tab", "Prev Tab", show=False),
         Binding("L,shift+l", "next_tab", "Next Tab", show=False),
         Binding(":", "command_palette", "Command", show=False),
@@ -567,7 +572,7 @@ class AudiobookManager(App):
         )
         yield SystemCommand(
             "Show Task Queue",
-            "View all pending and active tasks",
+            "Switch to the Queue tab",
             self.action_show_queue
         )
 
@@ -602,8 +607,11 @@ class AudiobookManager(App):
         return ""
 
     def action_show_queue(self) -> None:
-        """Shows the current task queue in a modal."""
-        self.push_screen(QueueViewerModal(self))
+        """Switches to the Queue tab."""
+        try:
+            self.query_one(TabbedContent).active = "queue-tab"
+        except Exception:
+            pass
 
     def action_general_settings(self) -> None:
         """Opens the general settings modal."""
@@ -673,7 +681,13 @@ class AudiobookManager(App):
         self.query_one("#library_table").action_scroll_bottom()
 
     def action_focus_search(self) -> None:
-        self.query_one("#search_input").focus()
+        try:
+            self.query_one(TabbedContent).active = "library-tab"
+            search_input = self.query_one("#search_input")
+            search_input.display = True
+            search_input.focus()
+        except Exception:
+            pass
 
     def action_quit(self) -> None:
         self.exit()
@@ -782,6 +796,7 @@ class AudiobookManager(App):
         # Switch to Queue tab and update
         try:
             self.query_one(TabbedContent).active = "queue-tab"
+            self.query_one("#queue-table").focus()
         except Exception:
             pass
         self.update_queue_table()
@@ -891,16 +906,36 @@ class AudiobookManager(App):
 
     def action_remove_from_queue(self) -> None:
         """Removes the selected book from the background task queue."""
-        table = self.query_one("#library_table", LibraryTable)
-        if table.cursor_row < 0:
+        try:
+            tabbed_content = self.query_one(TabbedContent)
+            active_tab = tabbed_content.active
+        except Exception:
+            active_tab = "library-tab"
+            
+        asin = None
+        if active_tab == "queue-tab":
+            try:
+                table = self.query_one("#queue-table", QueueTable)
+                if table.cursor_row is not None and table.cursor_row >= 0 and table.cursor_row < len(table.rows):
+                    row_data = table.get_row_at(table.cursor_row)
+                    if len(row_data) > 4:
+                        asin = row_data[4]
+            except Exception:
+                pass
+        else:
+            try:
+                table = self.query_one("#library_table", LibraryTable)
+                if table.cursor_row is not None and table.cursor_row >= 0 and table.cursor_row < len(table.rows):
+                    row_data = table.get_row_at(table.cursor_row)
+                    asin_key = self.col_keys.get("ASIN")
+                    if asin_key:
+                        asin_idx = list(self.col_keys.values()).index(asin_key)
+                        asin = row_data[asin_idx]
+            except Exception:
+                pass
+                
+        if not asin:
             return
-
-        row_data = table.get_row_at(table.cursor_row)
-        asin_key = self.col_keys.get("ASIN")
-        if not asin_key:
-            return
-        asin_idx = list(self.col_keys.values()).index(asin_key)
-        asin = row_data[asin_idx]
 
         # Find the book
         book = self._library_lookup.get(asin)
@@ -912,6 +947,7 @@ class AudiobookManager(App):
             book.queued = False
             book.working_mode = ""
             self.update_row_status(asin)
+            self.update_queue_table()
             self.notify(f"Removed '{book.title}' from queue.", severity="information")
             logger.info(f"Removed [bold cyan]{asin}[/] from task queue.")
         else:
@@ -986,6 +1022,17 @@ class AudiobookManager(App):
     def on_search_submitted(self) -> None:
         """Returns focus to the library when Enter is pressed in search."""
         self.query_one("#library_table").focus()
+
+    @on(TabbedContent.TabActivated)
+    def on_tab_activated(self, event: TabbedContent.TabActivated) -> None:
+        """Ensures that the appropriate table is focused when switching tabs."""
+        try:
+            if event.tab.id == "library-tab":
+                self.query_one("#library_table").focus()
+            elif event.tab.id == "queue-tab":
+                self.query_one("#queue-table").focus()
+        except Exception:
+            pass
 
     def apply_filter(self, filter_text: str) -> None:
         table = self.query_one("#library_table", LibraryTable)

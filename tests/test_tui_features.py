@@ -98,3 +98,39 @@ def test_process_selected():
         assert book1.queued is True
         assert book2.queued is True
         assert app.task_queue.pending_count == 2
+
+def test_remove_from_queue():
+    with patch("audiobook_manager.ConfigManager.load_config", return_value={}), \
+         patch("audiobook_manager.AudiobookService") as mock_service:
+        
+        app = AudiobookManager()
+        book1 = Audiobook(asin="ASIN1", author="Author 1", title="Title 1")
+        app.full_library = [book1]
+        app._library_lookup = {"ASIN1": book1}
+        book1.queued = True
+        app.task_queue.put("ASIN1")
+        
+        mock_table = MagicMock()
+        mock_table.cursor_row = 0
+        mock_table.get_row_at.return_value = ["Pos", "Action", "Progress", "Title", "ASIN1"]
+        mock_table.rows = [MagicMock(value="ASIN1")]
+        mock_table.scroll_offset = (0, 0)
+        mock_table.cursor_coordinate = None
+        
+        mock_tabbed = MagicMock()
+        mock_tabbed.active = "queue-tab"
+        
+        from textual.widgets import TabbedContent
+        def mock_query_one(query, *args, **kwargs):
+            if query == TabbedContent or "TabbedContent" in str(query):
+                return mock_tabbed
+            if "queue-table" in str(query):
+                return mock_table
+            return MagicMock()
+            
+        app.query_one = mock_query_one
+        
+        app.action_remove_from_queue()
+        
+        assert book1.queued is False
+        assert app.task_queue.pending_count == 0
