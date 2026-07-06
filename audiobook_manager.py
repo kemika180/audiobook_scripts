@@ -228,6 +228,7 @@ kemika_purple_theme = Theme(
     foreground="#e2e2e9",
     accent="#cbb2ff",
     boost="#1e1d32",
+    success="#b53580",
     variables={
         "scrollbar": "#5c3b8a",
         "scrollbar-hover": "#7b52ab",
@@ -274,7 +275,7 @@ class AudiobookManager(App):
         color: $text-muted;
     }
     LibraryTable > .datatable--selected {
-        background: $secondary;
+        background: $success;
         color: $foreground;
     }
     """

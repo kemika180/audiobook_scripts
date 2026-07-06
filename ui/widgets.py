@@ -140,8 +140,10 @@ class LibraryTable(DataTable):
         if class_name == "datatable--selected":
             try:
                 row_index = self.get_row_index(row_key)
+                self._clear_caches()
                 self.refresh_row(row_index)
             except Exception:
+                self._clear_caches()
                 self.refresh()
 
     def remove_row_class(self, row_key, class_name: str) -> None:
@@ -149,8 +151,10 @@ class LibraryTable(DataTable):
         if class_name == "datatable--selected":
             try:
                 row_index = self.get_row_index(row_key)
+                self._clear_caches()
                 self.refresh_row(row_index)
             except Exception:
+                self._clear_caches()
                 self.refresh()
 
 
